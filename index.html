@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>업무일지</title>
+<meta name="theme-color" content="#1F3D3A">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <div class="sync-dot" id="syncDot" title="동기화 상태"></div>
+
+  <!-- ============ 오늘 뷰 ============ -->
+  <section id="view-today" class="view">
+    <div class="day-header">
+      <div class="date-line">
+        <div>
+          <div class="date-main" id="todayDateMain">9월 10일 목요일</div>
+          <div class="date-sub" id="todayDateSub">2026</div>
+        </div>
+        <div class="day-nav">
+          <button id="prevDay" aria-label="이전 날">‹</button>
+          <button id="todayBtn" aria-label="오늘로">•</button>
+          <button id="nextDay" aria-label="다음 날">›</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="quick-add">
+      <div class="chip-row" id="chipRow">
+        <button class="chip" data-cat="업무">업무</button>
+        <button class="chip" data-cat="회의">회의</button>
+        <button class="chip" data-cat="요청">요청받은 일</button>
+        <button class="chip" data-cat="해결">해결한 문제</button>
+        <button class="chip" data-cat="기타">기타</button>
+      </div>
+      <div class="add-row">
+        <input type="time" class="time-input" id="itemTime">
+        <input type="text" class="content-input" id="itemContent" placeholder="바로 적기 (엔터로 추가)">
+        <button class="add-btn" id="addBtn" aria-label="추가">+</button>
+      </div>
+    </div>
+
+    <div class="timeline" id="timeline"></div>
+
+    <details class="reflection" id="reflectionBox">
+      <summary>
+        <span>오늘 정리</span>
+        <span class="hint" id="reflectionHint">비어있음</span>
+      </summary>
+      <div class="fields">
+        <div class="field">
+          <label for="fSummary">오늘 한 줄</label>
+          <textarea id="fSummary" rows="1" placeholder="오늘을 한 줄로 요약하면"></textarea>
+        </div>
+        <div class="field">
+          <label for="fDifficulty">어려웠던 점 &amp; 이유</label>
+          <textarea id="fDifficulty" placeholder="뭐가 어려웠고 왜 그랬는지"></textarea>
+        </div>
+        <div class="field">
+          <label for="fAchievement">잘한 점</label>
+          <textarea id="fAchievement" placeholder="오늘 잘 해낸 것"></textarea>
+        </div>
+        <div class="field">
+          <label for="fTomorrow">내일은?</label>
+          <textarea id="fTomorrow" placeholder="내일 할 일이나 이어갈 것"></textarea>
+        </div>
+        <div class="save-hint" id="saveHint">&nbsp;</div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ============ 캘린더 뷰 ============ -->
+  <section id="view-calendar" class="view" hidden>
+    <div class="view-header">
+      <h1>캘린더</h1>
+      <div class="month-nav">
+        <button id="prevMonth">‹</button>
+        <span id="monthLabel">2026년 9월</span>
+        <button id="nextMonth">›</button>
+      </div>
+    </div>
+    <div class="cal-grid">
+      <div class="cal-weekdays">
+        <div>월</div><div>화</div><div>수</div><div>목</div><div>금</div><div>토</div><div>일</div>
+      </div>
+      <div class="cal-days" id="calDays"></div>
+    </div>
+    <div class="day-sheet" id="daySheet" hidden></div>
+  </section>
+
+  <!-- ============ 히스토리 뷰 ============ -->
+  <section id="view-history" class="view" hidden>
+    <div class="view-header">
+      <h1>히스토리</h1>
+    </div>
+    <div class="search-box">
+      <input type="text" id="searchInput" placeholder="내용, 키워드로 검색">
+    </div>
+    <div class="hist-list" id="histList"></div>
+  </section>
+
+  <nav class="tab-bar">
+    <button class="tab-btn active" data-view="today">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z" stroke-linejoin="round"/><path d="M4 9h16M9 4v16"/></svg>
+      오늘
+    </button>
+    <button class="tab-btn" data-view="calendar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/></svg>
+      캘린더
+    </button>
+    <button class="tab-btn" data-view="history">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z" stroke-linejoin="round"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
+      히스토리
+    </button>
+  </nav>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
