@@ -9,6 +9,7 @@ const LS_LOGS = "worklog_logs";
 const LS_REFL = "worklog_reflections";
 const LS_OUTBOX = "worklog_outbox";
 const LS_GAS_URL = "worklog_gas_url";
+const LS_GAS_TOKEN = "worklog_gas_token";
 
 // 앱 안(설정 화면)에서 저장한 주소가 있으면 그걸 우선 사용, 없으면 CONFIG 기본값 사용
 function getGasUrl() {
@@ -20,6 +21,12 @@ function setGasUrl(url) {
 function isGasUrlSet() {
   const url = getGasUrl();
   return !!url && !url.startsWith("PUT_YOUR");
+}
+function getGasToken() {
+  return (localStorage.getItem(LS_GAS_TOKEN) || "").trim();
+}
+function setGasToken(token) {
+  localStorage.setItem(LS_GAS_TOKEN, (token || "").trim());
 }
 
 const CATS = ["업무", "회의", "요청", "해결", "기타"];
@@ -87,8 +94,53 @@ function getOutbox() {
 function setOutbox(arr) {
   localStorage.setItem(LS_OUTBOX, JSON.stringify(arr));
 }
+
+// 아직 서버에 보내지 않은 outbox 항목 중, 같은 대상(같은 로그 id 혹은 같은 날짜의 회고)에
+// 대한 이전 요청이 있으면 최종 상태 기준으로 압축한다. (ADD+UPDATE는 ADD 하나로,
+// UPDATE+UPDATE는 마지막 하나로, ADD+DELETE는 아예 보낼 필요 없이 제거)
+function getOutboxKey(action, payload) {
+  if (!payload) return null;
+  if (action === "UPSERT_REFLECTION") return "REFL:" + payload.date;
+  if (payload.id !== undefined) return "LOG:" + payload.id;
+  return null;
+}
+
 function queueOutbox(action, payload) {
   const box = getOutbox();
+  const key = getOutboxKey(action, payload);
+
+  if (key) {
+    const idx = box.findIndex(item => getOutboxKey(item.action, item.payload) === key);
+    if (idx !== -1) {
+      const prev = box[idx];
+      if (action === "DELETE_LOG") {
+        if (prev.action === "ADD_LOG") {
+          // 서버에 한 번도 올라간 적 없는 항목이 삭제됨 - 보낼 필요 자체가 없음
+          box.splice(idx, 1);
+          setOutbox(box);
+          scheduleSync();
+          return;
+        }
+        box[idx] = { action, payload, queuedAt: Date.now() };
+        setOutbox(box);
+        scheduleSync();
+        return;
+      }
+      if (prev.action === "ADD_LOG" && action === "UPDATE_LOG") {
+        // 아직 서버에 없는 항목의 내용만 갱신 - ADD 하나로 합친다
+        box[idx] = { action: "ADD_LOG", payload, queuedAt: prev.queuedAt };
+        setOutbox(box);
+        scheduleSync();
+        return;
+      }
+      // UPDATE_LOG 연속, 혹은 UPSERT_REFLECTION 연속 - 마지막 상태만 남긴다
+      box[idx] = { action, payload, queuedAt: Date.now() };
+      setOutbox(box);
+      scheduleSync();
+      return;
+    }
+  }
+
   box.push({ action, payload, queuedAt: Date.now() });
   setOutbox(box);
   scheduleSync();
@@ -116,7 +168,10 @@ async function flushOutbox() {
   const rest = [];
   for (const item of box) {
     try {
-      const url = getGasUrl() + "?action=" + encodeURIComponent(item.action) + "&payload=" + encodeURIComponent(JSON.stringify(item.payload));
+      const url = getGasUrl()
+        + "?action=" + encodeURIComponent(item.action)
+        + "&token=" + encodeURIComponent(getGasToken())
+        + "&payload=" + encodeURIComponent(JSON.stringify(item.payload));
       const res = await fetch(url);
       const data = await res.json();
       if (!data || data.ok === false) throw new Error(data && data.error);
@@ -132,8 +187,10 @@ async function fetchAndMergeAll() {
   if (!isGasUrlSet()) return;
   try {
     setSyncDot("pending");
-    const res = await fetch(getGasUrl() + "?action=getAll");
+    const url = getGasUrl() + "?action=getAll&token=" + encodeURIComponent(getGasToken());
+    const res = await fetch(url);
     const data = await res.json();
+    if (!data || data.ok === false) throw new Error((data && data.error) || "sync error");
     mergeServerData(data);
     setSyncDot("ok");
   } catch (e) {
@@ -151,6 +208,7 @@ function mergeServerData(data) {
       localById[sl.id] = sl;
     }
   });
+  // 서버에서 삭제(tombstone)로 확인된 항목은 local에서도 제거한다.
   state.logs = Object.values(localById).filter(l => !l.deleted);
   saveLocalLogs();
 
@@ -166,7 +224,16 @@ function mergeServerData(data) {
   renderCurrentView();
 }
 
-window.addEventListener("online", () => { flushOutbox(); fetchAndMergeAll(); });
+// outbox 업로드 후 서버 최신 상태를 다시 받아온다 (오프라인 복귀, 앱 시작, 포그라운드 전환 시 사용)
+async function syncNow() {
+  await flushOutbox();
+  await fetchAndMergeAll();
+}
+
+window.addEventListener("online", syncNow);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") syncNow();
+});
 
 // ---------------- 로그 항목 ----------------
 function addLogItem(cat, time, content) {
@@ -454,6 +521,8 @@ function renderHistory(filter = "") {
 function renderSettings() {
   const input = document.getElementById("gasUrlInput");
   input.value = getGasUrl().startsWith("PUT_YOUR") ? "" : getGasUrl();
+  const tokenInput = document.getElementById("gasTokenInput");
+  if (tokenInput) tokenInput.value = getGasToken();
   updateGasStatusText();
 }
 
@@ -466,18 +535,22 @@ function updateGasStatusText(msg) {
 
 async function saveGasUrlFromSettings() {
   const val = document.getElementById("gasUrlInput").value.trim();
+  const tokenVal = document.getElementById("gasTokenInput") ? document.getElementById("gasTokenInput").value.trim() : "";
   setGasUrl(val);
-  if (!val) { updateGasStatusText("연동 주소를 비웠어요 (로컬 저장만 됨)"); setSyncDot(""); return; }
+  setGasToken(tokenVal);
+  if (!val) { updateGasStatusText("연동 주소를 비웠어 (로컬 저장만 됨)"); setSyncDot(""); return; }
   updateGasStatusText("연결 테스트 중...");
   try {
-    const res = await fetch(getGasUrl() + "?action=getAll");
+    const url = getGasUrl() + "?action=getAll&token=" + encodeURIComponent(getGasToken());
+    const res = await fetch(url);
     const data = await res.json();
+    if (!data || data.ok === false) throw new Error((data && data.error) || "연결 실패");
     mergeServerData(data);
     updateGasStatusText("연결 성공, 동기화됨");
     setSyncDot("ok");
     flushOutbox();
   } catch (e) {
-    updateGasStatusText("연결 실패. 주소나 Apps Script 접근 권한(모든 사용자)을 확인해줘");
+    updateGasStatusText("연결 실패: " + (e.message || "주소·토큰이나 Apps Script 접근 권한(모든 사용자)을 확인해줘"));
     setSyncDot("error");
   }
 }
@@ -594,8 +667,7 @@ function init() {
   loadLocal();
   initEvents();
   renderToday();
-  flushOutbox();
-  fetchAndMergeAll();
+  syncNow();
 
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw.js").catch(() => {});
