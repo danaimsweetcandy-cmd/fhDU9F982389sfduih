@@ -116,11 +116,10 @@ async function flushOutbox() {
   const rest = [];
   for (const item of box) {
     try {
-      await fetch(getGasUrl(), {
-        method: "POST",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify(item)
-      });
+      const url = getGasUrl() + "?action=" + encodeURIComponent(item.action) + "&payload=" + encodeURIComponent(JSON.stringify(item.payload));
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!data || data.ok === false) throw new Error(data && data.error);
     } catch (e) {
       rest.push(item);
     }

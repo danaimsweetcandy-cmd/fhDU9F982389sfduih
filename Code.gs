@@ -53,27 +53,7 @@ function findRowIndexById_(sheet, idCol, idValue) {
   return -1;
 }
 
-function doGet(e) {
-  const action = (e.parameter.action || "getAll");
-  if (action === "getAll") {
-    const logSheet = getSheet_(LOG_SHEET, LOG_HEADERS);
-    const reflSheet = getSheet_(REFL_SHEET, REFL_HEADERS);
-    const logs = readAllRows_(logSheet, LOG_HEADERS).filter(l => !l.deleted);
-    const reflRows = readAllRows_(reflSheet, REFL_HEADERS);
-    const reflections = {};
-    reflRows.forEach(r => { reflections[r.date] = r; });
-    return ContentService.createTextOutput(JSON.stringify({ logs, reflections }))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-  return ContentService.createTextOutput(JSON.stringify({ error: "unknown action" }))
-    .setMimeType(ContentService.MimeType.JSON);
-}
-
-function doPost(e) {
-  const body = JSON.parse(e.postData.contents);
-  const action = body.action;
-  const payload = body.payload;
-
+function applyAction_(action, payload) {
   if (action === "ADD_LOG" || action === "UPDATE_LOG") {
     const sheet = getSheet_(LOG_SHEET, LOG_HEADERS);
     const idx = findRowIndexById_(sheet, 0, payload.id);
@@ -100,7 +80,44 @@ function doPost(e) {
       sheet.getRange(idx, 1, 1, REFL_HEADERS.length).setValues([row]);
     }
   }
+}
 
+function doGet(e) {
+  const action = (e.parameter.action || "getAll");
+
+  // 쓰기 동작(ADD_LOG 등)도 GET으로 처리한다.
+  // 이유: Apps Script 웹앱은 POST 요청에도 내부적으로 302 리다이렉트를 거치는데,
+  // 브라우저 fetch가 이 리다이렉트를 따라가면서 POST를 GET으로 바꾸고 body를
+  // 날려버리는 경우가 있어 doPost가 아예 호출되지 않을 수 있다. GET은 이 문제가 없다.
+  if (action !== "getAll" && e.parameter.payload) {
+    try {
+      const payload = JSON.parse(e.parameter.payload);
+      applyAction_(action, payload);
+      return ContentService.createTextOutput(JSON.stringify({ ok: true }))
+        .setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ ok: false, error: String(err) }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  if (action === "getAll") {
+    const logSheet = getSheet_(LOG_SHEET, LOG_HEADERS);
+    const reflSheet = getSheet_(REFL_SHEET, REFL_HEADERS);
+    const logs = readAllRows_(logSheet, LOG_HEADERS).filter(l => !l.deleted);
+    const reflRows = readAllRows_(reflSheet, REFL_HEADERS);
+    const reflections = {};
+    reflRows.forEach(r => { reflections[r.date] = r; });
+    return ContentService.createTextOutput(JSON.stringify({ logs, reflections }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+  return ContentService.createTextOutput(JSON.stringify({ error: "unknown action" }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function doPost(e) {
+  const body = JSON.parse(e.postData.contents);
+  applyAction_(body.action, body.payload);
   return ContentService.createTextOutput(JSON.stringify({ ok: true }))
     .setMimeType(ContentService.MimeType.JSON);
 }
