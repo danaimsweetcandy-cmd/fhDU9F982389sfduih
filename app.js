@@ -2,12 +2,25 @@
 // 설정: Apps Script 배포 후 이 URL을 교체하세요.
 // ============================================================
 const CONFIG = {
-  GAS_URL: "https://script.google.com/macros/s/AKfycbzUwwsJ3WQwBln-wAUH_RmORiTJ6F_mPFpRR3U2cY1YSiT8NZor3FzO_K6Vi2uRyjxR/exec"
+  GAS_URL: "PUT_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE"
 };
 
 const LS_LOGS = "worklog_logs";
 const LS_REFL = "worklog_reflections";
 const LS_OUTBOX = "worklog_outbox";
+const LS_GAS_URL = "worklog_gas_url";
+
+// 앱 안(설정 화면)에서 저장한 주소가 있으면 그걸 우선 사용, 없으면 CONFIG 기본값 사용
+function getGasUrl() {
+  return (localStorage.getItem(LS_GAS_URL) || CONFIG.GAS_URL || "").trim();
+}
+function setGasUrl(url) {
+  localStorage.setItem(LS_GAS_URL, (url || "").trim());
+}
+function isGasUrlSet() {
+  const url = getGasUrl();
+  return !!url && !url.startsWith("PUT_YOUR");
+}
 
 const CATS = ["업무", "회의", "요청", "해결", "기타"];
 const CAT_LABEL = { "업무": "업무", "회의": "회의", "요청": "요청받은 일", "해결": "해결한 문제", "기타": "기타" };
@@ -96,14 +109,14 @@ function setSyncDot(status) {
 }
 
 async function flushOutbox() {
-  if (!CONFIG.GAS_URL || CONFIG.GAS_URL.startsWith("PUT_YOUR")) { setSyncDot(""); return; }
+  if (!isGasUrlSet()) { setSyncDot(""); return; }
   const box = getOutbox();
   if (box.length === 0) { setSyncDot("ok"); return; }
   setSyncDot("pending");
   const rest = [];
   for (const item of box) {
     try {
-      await fetch(CONFIG.GAS_URL, {
+      await fetch(getGasUrl(), {
         method: "POST",
         headers: { "Content-Type": "text/plain;charset=utf-8" },
         body: JSON.stringify(item)
@@ -117,10 +130,10 @@ async function flushOutbox() {
 }
 
 async function fetchAndMergeAll() {
-  if (!CONFIG.GAS_URL || CONFIG.GAS_URL.startsWith("PUT_YOUR")) return;
+  if (!isGasUrlSet()) return;
   try {
     setSyncDot("pending");
-    const res = await fetch(CONFIG.GAS_URL + "?action=getAll");
+    const res = await fetch(getGasUrl() + "?action=getAll");
     const data = await res.json();
     mergeServerData(data);
     setSyncDot("ok");
@@ -437,6 +450,40 @@ function renderHistory(filter = "") {
 }
 
 // ============================================================
+// 렌더링: 설정 뷰
+// ============================================================
+function renderSettings() {
+  const input = document.getElementById("gasUrlInput");
+  input.value = getGasUrl().startsWith("PUT_YOUR") ? "" : getGasUrl();
+  updateGasStatusText();
+}
+
+function updateGasStatusText(msg) {
+  const box = document.getElementById("gasStatusText");
+  if (!box) return;
+  if (msg) { box.textContent = msg; return; }
+  box.textContent = isGasUrlSet() ? "연동 주소 저장됨" : "아직 연동 주소가 없어요";
+}
+
+async function saveGasUrlFromSettings() {
+  const val = document.getElementById("gasUrlInput").value.trim();
+  setGasUrl(val);
+  if (!val) { updateGasStatusText("연동 주소를 비웠어요 (로컬 저장만 됨)"); setSyncDot(""); return; }
+  updateGasStatusText("연결 테스트 중...");
+  try {
+    const res = await fetch(getGasUrl() + "?action=getAll");
+    const data = await res.json();
+    mergeServerData(data);
+    updateGasStatusText("연결 성공, 동기화됨");
+    setSyncDot("ok");
+    flushOutbox();
+  } catch (e) {
+    updateGasStatusText("연결 실패. 주소나 Apps Script 접근 권한(모든 사용자)을 확인해줘");
+    setSyncDot("error");
+  }
+}
+
+// ============================================================
 // 뷰 전환
 // ============================================================
 function switchView(view) {
@@ -444,6 +491,7 @@ function switchView(view) {
   document.getElementById("view-today").hidden = view !== "today";
   document.getElementById("view-calendar").hidden = view !== "calendar";
   document.getElementById("view-history").hidden = view !== "history";
+  document.getElementById("view-settings").hidden = view !== "settings";
   document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.view === view));
   renderCurrentView();
 }
@@ -452,6 +500,7 @@ function renderCurrentView() {
   if (state.currentView === "today") renderToday();
   else if (state.currentView === "calendar") renderCalendar();
   else if (state.currentView === "history") renderHistory(document.getElementById("searchInput").value);
+  else if (state.currentView === "settings") renderSettings();
 }
 
 // ============================================================
@@ -535,6 +584,8 @@ function initEvents() {
   });
 
   document.getElementById("searchInput").addEventListener("input", e => renderHistory(e.target.value));
+
+  document.getElementById("gasUrlSave").addEventListener("click", saveGasUrlFromSettings);
 }
 
 // ============================================================

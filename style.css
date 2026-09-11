@@ -359,7 +359,7 @@ input, textarea {
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--ink-faint);
   font-weight: 600;
 }
@@ -533,9 +533,10 @@ input, textarea {
   margin-top: 4px;
   font-size: 13px;
   color: var(--ink-soft);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  line-height: 1.5;
+  word-break: keep-all;
+  overflow-wrap: break-word;
 }
 
 .hist-card .hbody {
