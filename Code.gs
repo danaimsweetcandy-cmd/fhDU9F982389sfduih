@@ -39,6 +39,16 @@ function getSheet_(name, headers) {
   return sheet;
 }
 
+function dateKey_(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    const tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+    return Utilities.formatDate(value, tz, "yyyy-MM-dd");
+  }
+  const s = String(value == null ? "" : value).trim();
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : s;
+}
+
 function readAllRows_(sheet, headers) {
   const values = sheet.getDataRange().getValues();
   if (values.length < 2) return [];
@@ -47,7 +57,13 @@ function readAllRows_(sheet, headers) {
     const row = values[i];
     if (row.every(c => c === "")) continue;
     const obj = {};
-    headers.forEach((h, idx) => { obj[h] = row[idx]; });
+    headers.forEach((h, idx) => {
+      const value = row[idx];
+      if (h === "date") obj[h] = dateKey_(value);
+      else if (h === "updatedAt") obj[h] = value instanceof Date ? value.getTime() : (Number(value) || 0);
+      else if (h === "deleted") obj[h] = value === true || String(value).toLowerCase() === "true" || value === "Y";
+      else obj[h] = value;
+    });
     rows.push(obj);
   }
   return rows;
@@ -55,8 +71,12 @@ function readAllRows_(sheet, headers) {
 
 function findRowIndexById_(sheet, idCol, idValue) {
   const values = sheet.getDataRange().getValues();
+  const target = String(idValue == null ? "" : idValue);
+  const compareAsDate = /^\d{4}-\d{2}-\d{2}$/.test(target);
   for (let i = 1; i < values.length; i++) {
-    if (values[i][idCol] === idValue) return i + 1; // 1-based sheet row
+    const cell = values[i][idCol];
+    const actual = compareAsDate ? dateKey_(cell) : String(cell == null ? "" : cell);
+    if (actual === target) return i + 1; // 1-based sheet row
   }
   return -1;
 }
@@ -150,7 +170,13 @@ function doGet(e) {
     const logs = readAllRows_(logSheet, LOG_HEADERS);
     const reflRows = readAllRows_(reflSheet, REFL_HEADERS);
     const reflections = {};
-    reflRows.forEach(r => { reflections[r.date] = r; });
+    reflRows.forEach(r => {
+      if (!r.date) return;
+      const prev = reflections[r.date];
+      if (!prev || Number(r.updatedAt || 0) >= Number(prev.updatedAt || 0)) {
+        reflections[r.date] = r;
+      }
+    });
     return ContentService.createTextOutput(JSON.stringify({ ok: true, logs, reflections }))
       .setMimeType(ContentService.MimeType.JSON);
   }

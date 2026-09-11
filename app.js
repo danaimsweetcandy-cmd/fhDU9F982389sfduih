@@ -69,16 +69,50 @@ function addDays(dateStr, n) {
   return todayStr(dt);
 }
 
+function normalizeDateStr(value) {
+  if (typeof value === "string") {
+    const exact = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (exact) return `${exact[1]}-${exact[2]}-${exact[3]}`;
+  }
+  const dt = value instanceof Date ? value : new Date(value);
+  if (!Number.isNaN(dt.getTime())) return todayStr(dt);
+  return "";
+}
+
 function formatDateMain(dateStr) {
-  const [y, m, d] = dateStr.split("-").map(Number);
+  const normalized = normalizeDateStr(dateStr);
+  if (!normalized) return "날짜 미상";
+  const [y, m, d] = normalized.split("-").map(Number);
   const dt = new Date(y, m - 1, d);
   return `${m}월 ${d}일 ${WEEKDAY_KR[dt.getDay()]}요일`;
+}
+
+function normalizeStoredData() {
+  state.logs = state.logs.map(log => {
+    const date = normalizeDateStr(log && log.date);
+    return { ...log, date: date || (log && log.date) || "" };
+  });
+
+  const normalizedRefl = {};
+  Object.keys(state.reflections || {}).forEach(key => {
+    const value = state.reflections[key] || {};
+    const date = normalizeDateStr(value.date || key);
+    if (!date) return;
+    const prev = normalizedRefl[date];
+    if (!prev || Number(value.updatedAt || 0) >= Number(prev.updatedAt || 0)) {
+      normalizedRefl[date] = { ...value, date };
+    }
+  });
+  state.reflections = normalizedRefl;
 }
 
 // ---------------- 로컬 저장 ----------------
 function loadLocal() {
   try { state.logs = JSON.parse(localStorage.getItem(LS_LOGS)) || []; } catch (e) { state.logs = []; }
   try { state.reflections = JSON.parse(localStorage.getItem(LS_REFL)) || {}; } catch (e) { state.reflections = {}; }
+  normalizeStoredData();
+  saveLocalLogs();
+  saveLocalRefl();
 }
 
 function saveLocalLogs() {
@@ -202,9 +236,17 @@ function mergeServerData(data) {
   const serverLogs = data.logs || [];
   const localById = {};
   state.logs.forEach(l => { localById[l.id] = l; });
-  serverLogs.forEach(sl => {
+  serverLogs.forEach(raw => {
+    if (!raw || !raw.id) return;
+    const normalizedDate = normalizeDateStr(raw.date);
+    const sl = {
+      ...raw,
+      date: normalizedDate || raw.date || "",
+      updatedAt: Number(raw.updatedAt) || 0,
+      deleted: raw.deleted === true || raw.deleted === "true" || raw.deleted === "Y"
+    };
     const local = localById[sl.id];
-    if (!local || (sl.updatedAt || 0) >= (local.updatedAt || 0)) {
+    if (!local || sl.updatedAt >= Number(local.updatedAt || 0)) {
       localById[sl.id] = sl;
     }
   });
@@ -213,10 +255,13 @@ function mergeServerData(data) {
   saveLocalLogs();
 
   const serverRefl = data.reflections || {};
-  Object.keys(serverRefl).forEach(date => {
-    const s = serverRefl[date];
+  Object.keys(serverRefl).forEach(rawKey => {
+    const raw = serverRefl[rawKey] || {};
+    const date = normalizeDateStr(raw.date || rawKey);
+    if (!date) return;
+    const s = { ...raw, date, updatedAt: Number(raw.updatedAt) || 0 };
     const l = state.reflections[date];
-    if (!l || (s.updatedAt || 0) >= (l.updatedAt || 0)) {
+    if (!l || s.updatedAt >= Number(l.updatedAt || 0)) {
       state.reflections[date] = s;
     }
   });
@@ -380,8 +425,9 @@ function renderCalendar() {
     const dd = String(d).padStart(2, "0");
     cells.push({ day: d, other: false, dateStr: `${state.calYear}-${m}-${dd}` });
   }
+  let nextMonthDay = 1;
   while (cells.length % 7 !== 0) {
-    cells.push({ day: cells.length, other: true, dateStr: null });
+    cells.push({ day: nextMonthDay++, other: true, dateStr: null });
   }
 
   const todayS = todayStr();
