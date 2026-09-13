@@ -49,8 +49,30 @@ function dateKey_(value) {
   return m ? `${m[1]}-${m[2]}-${m[3]}` : s;
 }
 
+function timeKey_(rawValue, displayValue) {
+  const displayed = String(displayValue == null ? "" : displayValue).trim();
+  let m = displayed.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (m) return String(Number(m[1])).padStart(2, "0") + ":" + m[2];
+
+  // 시트 로캘이 12시간제여도 HH:mm으로 정규화한다.
+  m = displayed.match(/^(오전|오후|AM|PM)\s*(\d{1,2}):(\d{2})(?::\d{2})?$/i);
+  if (m) {
+    let h = Number(m[2]) % 12;
+    const pm = m[1] === "오후" || String(m[1]).toUpperCase() === "PM";
+    if (pm) h += 12;
+    return String(h).padStart(2, "0") + ":" + m[3];
+  }
+
+  const raw = String(rawValue == null ? "" : rawValue).trim();
+  m = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (m) return String(Number(m[1])).padStart(2, "0") + ":" + m[2];
+  return raw;
+}
+
 function readAllRows_(sheet, headers) {
-  const values = sheet.getDataRange().getValues();
+  const range = sheet.getDataRange();
+  const values = range.getValues();
+  const displayValues = range.getDisplayValues();
   if (values.length < 2) return [];
   const rows = [];
   for (let i = 1; i < values.length; i++) {
@@ -60,6 +82,7 @@ function readAllRows_(sheet, headers) {
     headers.forEach((h, idx) => {
       const value = row[idx];
       if (h === "date") obj[h] = dateKey_(value);
+      else if (h === "time") obj[h] = timeKey_(value, displayValues[i][idx]);
       else if (h === "updatedAt") obj[h] = value instanceof Date ? value.getTime() : (Number(value) || 0);
       else if (h === "deleted") obj[h] = value === true || String(value).toLowerCase() === "true" || value === "Y";
       else obj[h] = value;
@@ -95,12 +118,18 @@ function applyAction_(action, payload) {
       const existingUpdatedAt = Number(existing[5]) || 0; // updatedAt 컬럼(6번째)
       if (existingUpdatedAt > incomingUpdatedAt) return { skipped: true };
     }
-    const row = LOG_HEADERS.map(h => payload[h] !== undefined ? payload[h] : "");
+    const cleanPayload = { ...payload, date: dateKey_(payload.date), time: timeKey_(payload.time, payload.time) };
+    const row = LOG_HEADERS.map(h => cleanPayload[h] !== undefined ? cleanPayload[h] : "");
+    let targetRow = idx;
     if (idx === -1) {
       sheet.appendRow(row);
+      targetRow = sheet.getLastRow();
     } else {
       sheet.getRange(idx, 1, 1, LOG_HEADERS.length).setValues([row]);
     }
+    sheet.getRange(targetRow, 2, 1, 2).setNumberFormat("@");
+    sheet.getRange(targetRow, 2).setValue(cleanPayload.date);
+    sheet.getRange(targetRow, 3).setValue(cleanPayload.time);
     return { skipped: false };
 
   } else if (action === "DELETE_LOG") {

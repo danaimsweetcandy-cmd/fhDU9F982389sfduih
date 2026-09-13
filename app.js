@@ -62,6 +62,21 @@ function nowTimeStr() {
   return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
 }
 
+function normalizeTimeStr(value) {
+  const s = String(value == null ? "" : value).trim();
+  let m = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (m) {
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    if (h >= 0 && h <= 23 && min >= 0 && min <= 59) {
+      return String(h).padStart(2, "0") + ":" + String(min).padStart(2, "0");
+    }
+  }
+  m = s.match(/T(\d{2}):(\d{2})/);
+  if (m) return `${m[1]}:${m[2]}`;
+  return "";
+}
+
 function addDays(dateStr, n) {
   const [y, m, d] = dateStr.split("-").map(Number);
   const dt = new Date(y, m - 1, d);
@@ -90,7 +105,8 @@ function formatDateMain(dateStr) {
 function normalizeStoredData() {
   state.logs = state.logs.map(log => {
     const date = normalizeDateStr(log && log.date);
-    return { ...log, date: date || (log && log.date) || "" };
+    const time = normalizeTimeStr(log && log.time);
+    return { ...log, date: date || (log && log.date) || "", time: time || "00:00" };
   });
 
   const normalizedRefl = {};
@@ -242,6 +258,7 @@ function mergeServerData(data) {
     const sl = {
       ...raw,
       date: normalizedDate || raw.date || "",
+      time: normalizeTimeStr(raw.time) || "00:00",
       updatedAt: Number(raw.updatedAt) || 0,
       deleted: raw.deleted === true || raw.deleted === "true" || raw.deleted === "Y"
     };
@@ -315,15 +332,26 @@ function deleteLogItem(id) {
   queueOutbox("DELETE_LOG", { id, updatedAt: Date.now() });
 }
 
-function updateLogContent(id, content) {
+function updateLogFields(id, fields) {
   const item = state.logs.find(l => l.id === id);
-  if (!item) return;
-  content = content.trim();
-  if (!content) { deleteLogItem(id); renderCurrentView(); return; }
+  if (!item) return false;
+  const content = fields.content !== undefined ? String(fields.content).trim() : item.content;
+  if (!content) return false;
+  const time = fields.time !== undefined ? normalizeTimeStr(fields.time) : item.time;
+  const cat = fields.cat !== undefined && CATS.includes(fields.cat) ? fields.cat : item.cat;
+  if (!time) return false;
   item.content = content;
+  item.time = time;
+  item.cat = cat;
   item.updatedAt = Date.now();
   saveLocalLogs();
-  queueOutbox("UPDATE_LOG", item);
+  queueOutbox("UPDATE_LOG", { ...item });
+  return true;
+}
+
+function updateLogContent(id, content) {
+  if (!String(content || "").trim()) { deleteLogItem(id); renderCurrentView(); return; }
+  updateLogFields(id, { content });
 }
 
 function logsForDate(date) {
@@ -548,7 +576,7 @@ function renderHistory(filter = "") {
         <div class="hsummary">${escapeHtml(previewText)}</div>
       </summary>
       <div class="hbody">
-        ${items.map(i => `<div class="log-item" data-cat="${i.cat}"><div class="time">${i.time}</div><div class="bar"></div><div class="content"><span class="cat-label">${CAT_LABEL[i.cat] || i.cat}</span>${escapeHtml(i.content)}</div></div>`).join("") || `<div class="timeline-empty">기록된 일 없음</div>`}
+        ${items.map(i => `<div class="log-item hist-log-item" data-cat="${i.cat}" data-id="${i.id}"><div class="time">${i.time}</div><div class="bar"></div><div class="content"><span class="cat-label">${CAT_LABEL[i.cat] || i.cat}</span>${escapeHtml(i.content)}</div><button class="hist-edit" data-edit-id="${i.id}" type="button">수정</button></div>`).join("") || `<div class="timeline-empty">기록된 일 없음</div>`}
         ${(r.summary || r.difficulty || r.achievement || r.tomorrow) ? `
         <div class="refl-block">
           ${r.difficulty ? `<div><div class="k">어려웠던 점 &amp; 이유</div><div class="v">${escapeHtml(r.difficulty)}</div></div>` : ""}
@@ -558,6 +586,44 @@ function renderHistory(filter = "") {
       </div>
     `;
     list.appendChild(det);
+  });
+}
+
+function openHistoryEditor(id) {
+  const item = state.logs.find(l => l.id === id);
+  const row = document.querySelector(`.hist-log-item[data-id="${CSS.escape(id)}"]`);
+  if (!item || !row) return;
+  const options = CATS.map(cat => `<option value="${cat}"${cat === item.cat ? " selected" : ""}>${CAT_LABEL[cat] || cat}</option>`).join("");
+  row.innerHTML = `
+    <div class="hist-edit-form">
+      <div class="hist-edit-meta">
+        <input class="hist-time-edit" type="time" value="${normalizeTimeStr(item.time) || "00:00"}" aria-label="시간">
+        <select class="hist-cat-edit" aria-label="업무 종류">${options}</select>
+      </div>
+      <input class="hist-content-edit" type="text" value="${escapeHtml(item.content)}" aria-label="내용">
+      <div class="hist-edit-actions">
+        <button type="button" class="hist-save">저장</button>
+        <button type="button" class="hist-cancel">취소</button>
+      </div>
+    </div>`;
+  const contentInput = row.querySelector(".hist-content-edit");
+  contentInput.focus();
+  contentInput.select();
+  row.querySelector(".hist-save").addEventListener("click", () => {
+    const ok = updateLogFields(id, {
+      time: row.querySelector(".hist-time-edit").value,
+      cat: row.querySelector(".hist-cat-edit").value,
+      content: contentInput.value
+    });
+    if (!ok) { contentInput.focus(); return; }
+    renderHistory(document.getElementById("searchInput").value);
+  });
+  row.querySelector(".hist-cancel").addEventListener("click", () => {
+    renderHistory(document.getElementById("searchInput").value);
+  });
+  contentInput.addEventListener("keydown", e => {
+    if (e.key === "Enter") row.querySelector(".hist-save").click();
+    if (e.key === "Escape") row.querySelector(".hist-cancel").click();
   });
 }
 
@@ -702,6 +768,10 @@ function initEvents() {
   });
 
   document.getElementById("searchInput").addEventListener("input", e => renderHistory(e.target.value));
+  document.getElementById("histList").addEventListener("click", e => {
+    const btn = e.target.closest("[data-edit-id]");
+    if (btn) { e.preventDefault(); e.stopPropagation(); openHistoryEditor(btn.dataset.editId); }
+  });
 
   document.getElementById("gasUrlSave").addEventListener("click", saveGasUrlFromSettings);
 }

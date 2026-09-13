@@ -589,3 +589,17 @@ input, textarea {
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ---------- History edit ---------- */
+.hist-edit { flex:none; align-self:center; padding:5px 7px; border-radius:6px; color:var(--ink-soft); font-size:11px; font-weight:600; }
+.hist-edit:hover { background:var(--accent-soft); color:var(--accent); }
+.hist-edit-form { width:100%; display:flex; flex-direction:column; gap:8px; padding:2px 0; }
+.hist-edit-meta { display:flex; gap:8px; }
+.hist-edit-meta input,.hist-edit-meta select,.hist-content-edit { border:1px solid var(--line); border-radius:var(--radius-s); padding:8px 10px; font-size:13px; background:var(--paper); color:var(--ink); }
+.hist-edit-meta input { width:105px; }
+.hist-edit-meta select { flex:1; min-width:0; }
+.hist-content-edit { width:100%; font-size:14px; }
+.hist-edit-actions { display:flex; justify-content:flex-end; gap:6px; }
+.hist-edit-actions button { padding:7px 12px; border-radius:var(--radius-s); font-size:12px; font-weight:700; }
+.hist-edit-actions .hist-save { background:var(--accent); color:#fff; }
+.hist-edit-actions .hist-cancel { background:var(--paper); border:1px solid var(--line); color:var(--ink-soft); }
