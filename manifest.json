@@ -1,15 +1,24 @@
 {
+  "id": "./",
   "name": "업무일지",
   "short_name": "업무일지",
-  "description": "그때그때 기록하는 개인 업무일지",
-  "start_url": "./index.html",
+  "description": "그때그때 기록하고 안전하게 동기화하는 개인 업무일지",
+  "start_url": "./index.html?view=today",
   "scope": "./",
   "display": "standalone",
   "background_color": "#F6F4EF",
   "theme_color": "#1F3D3A",
-  "orientation": "portrait-primary",
+  "lang": "ko",
   "icons": [
-    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "shortcuts": [
+    { "name": "오늘 기록", "short_name": "오늘", "url": "./index.html?view=today", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "캘린더", "short_name": "캘린더", "url": "./index.html?view=calendar", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "히스토리", "short_name": "히스토리", "url": "./index.html?view=history", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] }
+  ],
+  "screenshots": [
+    { "src": "screenshots/worklog-mobile.png", "sizes": "390x844", "type": "image/png", "form_factor": "narrow", "label": "업무일지 오늘 화면" }
   ]
 }
