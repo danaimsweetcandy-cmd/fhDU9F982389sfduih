@@ -1,28 +1,230 @@
-<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>업무일지</title><meta name="theme-color" content="#1F3D3A"><link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="icons/icon-192.png"><link rel="icon" href="icons/icon-192.png"><link rel="stylesheet" href="style.css"></head>
-<body><div id="app">
-<button class="sync-control" id="syncBtn" type="button" aria-label="동기화 상태: 연동 안 함" title="동기화"><span class="sync-dot" id="syncDot" aria-hidden="true"></span></button>
-<section id="view-today" class="view" data-view="today">
-  <header class="day-header"><div class="date-line"><div><div class="date-main" id="todayDateMain"></div><div class="date-sub" id="todayDateSub"></div></div><div class="day-nav"><button id="prevDay" type="button" aria-label="이전 날">‹</button><button id="todayBtn" type="button" aria-label="오늘로 이동">•</button><button id="nextDay" type="button" aria-label="다음 날">›</button></div></div></header>
-  <div class="quick-add"><div class="chip-row" id="chipRow" role="group" aria-label="업무 종류"><button class="chip active" data-cat="업무" type="button" aria-pressed="true">업무</button><button class="chip" data-cat="회의" type="button" aria-pressed="false">회의</button><button class="chip" data-cat="요청" type="button" aria-pressed="false">요청받은 일</button><button class="chip" data-cat="해결" type="button" aria-pressed="false">해결한 문제</button><button class="chip" data-cat="기타" type="button" aria-pressed="false">기타</button></div><div class="add-row"><input type="time" class="time-input" id="itemTime" aria-label="시간"><input type="text" class="content-input" id="itemContent" maxlength="500" enterkeyhint="done" autocomplete="off" placeholder="바로 적기 (엔터로 추가)"><button class="add-btn" id="addBtn" type="button" aria-label="업무 기록 추가" disabled>+</button></div><div class="draft-hint" id="draftHint"></div></div>
-  <div class="timeline" id="timeline"></div>
-  <details class="reflection" id="reflectionBox"><summary><span>오늘 정리</span><span class="hint" id="reflectionHint">비어있음</span></summary><div class="fields">
-    <div class="field"><label for="fSummary">오늘 한 줄 <span class="count" data-count-for="fSummary"></span></label><textarea id="fSummary" rows="1" maxlength="500" placeholder="오늘을 한 줄로 요약하면"></textarea></div>
-    <div class="field"><label for="fDifficulty">어려웠던 점 &amp; 이유 <span class="count" data-count-for="fDifficulty"></span></label><textarea id="fDifficulty" maxlength="500" placeholder="뭐가 어려웠고 왜 그랬는지"></textarea></div>
-    <div class="field"><label for="fAchievement">잘한 점 <span class="count" data-count-for="fAchievement"></span></label><textarea id="fAchievement" maxlength="500" placeholder="오늘 잘 해낸 것"></textarea></div>
-    <div class="field"><label for="fTomorrow">내일은? <span class="count" data-count-for="fTomorrow"></span></label><textarea id="fTomorrow" maxlength="500" placeholder="내일 할 일이나 이어갈 것"></textarea></div>
-    <div class="save-hint" id="saveHint" role="status" aria-live="polite">&nbsp;</div>
-  </div></details>
-</section>
-<section id="view-calendar" class="view" data-view="calendar" hidden><div class="view-header"><h1>캘린더</h1><div class="month-nav"><button id="prevMonth" type="button" aria-label="이전 달">‹</button><span id="monthLabel"></span><button id="nextMonth" type="button" aria-label="다음 달">›</button></div></div><div class="cal-grid"><div class="cal-weekdays" aria-hidden="true"><div>월</div><div>화</div><div>수</div><div>목</div><div>금</div><div>토</div><div>일</div></div><div class="cal-days" id="calDays"></div></div><div class="day-sheet" id="daySheet" hidden></div></section>
-<section id="view-history" class="view" data-view="history" hidden><div class="view-header"><h1>히스토리</h1></div><div class="search-box"><input type="search" id="searchInput" autocomplete="off" placeholder="날짜, 시간, 종류, 내용, 회고 검색" aria-label="히스토리 검색"></div><div class="hist-list" id="histList"></div></section>
-<section id="view-settings" class="view" data-view="settings" hidden><div class="view-header"><h1>설정</h1></div><div class="settings-wrap">
-  <section class="setting-card"><h2>동기화</h2><p class="setting-hint">기록은 항상 이 기기에 먼저 저장돼. 온라인이 되면 Google Sheets와 자동으로 맞춰져.</p><div class="field"><label for="gasUrlInput">Apps Script 웹 앱 URL</label><textarea id="gasUrlInput" rows="2" placeholder="https://script.google.com/macros/s/.../exec"></textarea></div><div class="field"><label for="gasTokenInput">API 토큰</label><div class="secret-row"><input type="password" id="gasTokenInput" autocomplete="off" placeholder="Code.gs TOKEN과 같은 값"><button id="toggleToken" class="small-btn" type="button" aria-pressed="false">보기</button></div></div><div class="button-row"><button class="action primary" id="gasUrlSave" type="button">연결 확인</button><button class="action" id="syncNowBtn" type="button">지금 동기화</button><button class="action" id="fullSyncBtn" type="button">전체 다시 맞추기</button></div><p class="setting-hint status" id="gasStatusText" role="status" aria-live="polite"></p></section>
-  <section class="setting-card"><h2>데이터 · 백업</h2><div class="button-row"><button class="action" id="exportJson" type="button">JSON 백업</button><button class="action" id="exportCsv" type="button">CSV 내보내기</button><button class="action" id="importJson" type="button">백업 불러오기</button></div><p class="setting-hint" id="dataStatus"></p><input id="importFile" type="file" accept="application/json,.json" hidden></section>
-  <section class="setting-card danger"><h2>복구 · 초기화</h2><p class="setting-hint">로컬 캐시를 초기화해도 Google Sheets 데이터는 다음 동기화 때 다시 내려와.</p><button class="action danger-btn" id="resetLocal" type="button">로컬 캐시 초기화</button></section>
-  <section class="setting-card"><h2>앱 정보</h2><p class="setting-hint" id="appInfo"></p><p class="setting-hint" id="storageInfo"></p></section>
-</div></section>
-<nav class="tab-bar" aria-label="주요 메뉴"><button class="tab-btn active" data-view="today" type="button" aria-current="page"><span>오늘</span></button><button class="tab-btn" data-view="calendar" type="button"><span>캘린더</span></button><button class="tab-btn" data-view="history" type="button"><span>히스토리</span></button><button class="tab-btn" data-view="settings" type="button"><span>설정</span></button></nav>
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1F3D3A">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>업무일지</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <button id="syncBtn" class="sync-btn" type="button" aria-label="지금 동기화" title="지금 동기화">
+    <span id="syncDot" class="sync-dot" aria-hidden="true"></span>
+    <span id="syncStatusText" class="sr-only">동기화 상태</span>
+  </button>
+
+  <main>
+    <section id="view-today" class="view">
+      <header class="day-header">
+        <div>
+          <div id="todayDateMain" class="date-main"></div>
+          <div id="todayDateSub" class="date-sub"></div>
+        </div>
+        <div class="day-nav">
+          <button id="prevDay" type="button" aria-label="이전 날">‹</button>
+          <button id="todayBtn" class="today-jump" type="button">오늘</button>
+          <button id="nextDay" type="button" aria-label="다음 날">›</button>
+        </div>
+      </header>
+
+      <section class="quick-add" aria-label="빠른 기록">
+        <div class="chip-row" id="catChips" role="group" aria-label="업무 종류">
+          <button class="chip active" data-cat="업무" type="button">업무</button>
+          <button class="chip" data-cat="수정" type="button">수정</button>
+          <button class="chip" data-cat="검수" type="button">검수</button>
+          <button class="chip" data-cat="진행관리" type="button">진행관리</button>
+          <button class="chip" data-cat="회의" type="button">회의</button>
+          <button class="chip" data-cat="해결" type="button">문제해결</button>
+          <button class="chip" data-cat="기타" type="button">기타</button>
+        </div>
+
+        <div class="add-row">
+          <input id="quickContent" class="content-input" type="text" maxlength="160" autocomplete="off" enterkeyhint="done" placeholder="무슨 일을 했어?" aria-label="업무명">
+          <button id="quickAddBtn" class="add-btn" type="button">저장</button>
+        </div>
+
+        <div class="origin-row" role="group" aria-label="업무 발생 경로">
+          <button class="origin-chip active" data-origin="" type="button">기본</button>
+          <button class="origin-chip" data-origin="request" type="button">요청받음</button>
+          <button class="origin-chip" data-origin="self" type="button">내가 먼저 함</button>
+        </div>
+
+        <div id="requestFields" class="request-fields" hidden>
+          <div class="request-line">
+            <input id="requesterInput" type="text" maxlength="40" list="requesterList" autocomplete="off" placeholder="요청자 이름" aria-label="요청자 이름">
+            <datalist id="requesterList"></datalist>
+          </div>
+          <div class="when-row" role="group" aria-label="언제 할 요청인지">
+            <button class="when-chip active" data-when="now" type="button">지금</button>
+            <button class="when-chip" data-when="today" type="button">오늘</button>
+            <button class="when-chip" data-when="tomorrow" type="button">내일</button>
+            <button class="when-chip" data-when="date" type="button">날짜</button>
+            <input id="requestDueDate" type="date" aria-label="요청 예정일" hidden>
+          </div>
+          <p class="microcopy">요청받은 시각은 저장하는 순간 자동으로 남아.</p>
+        </div>
+
+        <details class="extra-details">
+          <summary>추가 정보</summary>
+          <div class="extra-grid">
+            <input id="quickProject" type="text" maxlength="60" autocomplete="off" placeholder="프로젝트 (선택)" aria-label="프로젝트">
+            <input id="quickMemo" type="text" maxlength="180" autocomplete="off" placeholder="메모 (선택)" aria-label="메모">
+          </div>
+        </details>
+      </section>
+
+      <section id="pendingSection" class="pending-section" hidden>
+        <div class="section-title-row">
+          <h2>해야 할 요청</h2>
+          <span id="pendingCount" class="count-badge"></span>
+        </div>
+        <div id="pendingList" class="pending-list"></div>
+      </section>
+
+      <section class="timeline-section">
+        <div class="section-title-row">
+          <h2>기록</h2>
+          <span id="dayCount" class="section-note"></span>
+        </div>
+        <div id="timeline" class="timeline"></div>
+      </section>
+
+      <details class="reflection" id="reflectionBox">
+        <summary>
+          <span id="reflectionTitle">오늘 회고</span>
+          <span id="reflectionHint" class="hint">비어있음</span>
+        </summary>
+        <div class="fields">
+          <div class="field">
+            <label for="fSummary">한 줄 요약</label>
+            <textarea id="fSummary" maxlength="160" placeholder="오늘의 핵심"></textarea>
+          </div>
+          <div class="field">
+            <label for="fDifficulty">힘들었던 점과 이유</label>
+            <textarea id="fDifficulty" maxlength="160" placeholder="번아웃 신호나 방해 요인이 있었는지"></textarea>
+          </div>
+          <div class="field">
+            <label for="fAchievement">잘한 점</label>
+            <textarea id="fAchievement" maxlength="160" placeholder="오늘 해낸 것, 성장한 점"></textarea>
+          </div>
+          <div class="field">
+            <label for="fTomorrow">내일은?</label>
+            <textarea id="fTomorrow" maxlength="160" placeholder="이어갈 것"></textarea>
+          </div>
+          <div id="saveHint" class="save-hint">&nbsp;</div>
+        </div>
+      </details>
+    </section>
+
+    <section id="view-summary" class="view" hidden>
+      <header class="view-header summary-header">
+        <h1>월별 요약</h1>
+        <div class="month-nav">
+          <button id="prevMonth" type="button" aria-label="이전 달">‹</button>
+          <span id="monthLabel"></span>
+          <button id="nextMonth" type="button" aria-label="다음 달">›</button>
+        </div>
+      </header>
+      <div id="monthSummary" class="summary-wrap"></div>
+    </section>
+
+    <section id="view-history" class="view" hidden>
+      <header class="view-header">
+        <h1>히스토리</h1>
+      </header>
+      <div class="search-box">
+        <input type="search" id="searchInput" aria-label="히스토리 검색" placeholder="업무, 요청자, 프로젝트, 메모 검색">
+      </div>
+      <div id="histList" class="hist-list"></div>
+    </section>
+
+    <section id="view-settings" class="view" hidden>
+      <header class="view-header">
+        <h1>설정</h1>
+      </header>
+      <div class="settings-wrap">
+        <section class="setting-card">
+          <h2>구글 시트 연동</h2>
+          <p class="setting-help">기존 업무일지의 URL과 토큰을 그대로 사용해. 새 Code.gs는 기존 시트의 행을 지우지 않고 필요한 컬럼만 뒤에 추가해.</p>
+          <label class="field single"><span>Apps Script 웹 앱 URL</span><textarea id="gasUrlInput" rows="3" placeholder="https://script.google.com/macros/s/.../exec"></textarea></label>
+          <label class="field single"><span>API 토큰</span><input id="gasTokenInput" type="text" autocomplete="off" placeholder="Code.gs의 TOKEN과 같은 값"></label>
+          <div class="settings-actions">
+            <button id="gasUrlSave" class="primary-btn" type="button">저장 및 연결 확인</button>
+            <button id="syncNowBtn" class="secondary-btn" type="button">지금 동기화</button>
+          </div>
+          <div id="gasStatusText" class="setting-status">&nbsp;</div>
+        </section>
+
+        <section class="setting-card">
+          <h2>데이터</h2>
+          <p id="dataStatusText" class="setting-help"></p>
+          <button id="exportBackupBtn" class="secondary-btn full" type="button">기기 백업 JSON 저장</button>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <nav class="tab-bar" aria-label="주 메뉴">
+    <button class="tab-btn active" data-view="today" type="button" aria-current="page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 4v16"/></svg>
+      오늘
+    </button>
+    <button class="tab-btn" data-view="summary" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/></svg>
+      월요약
+    </button>
+    <button class="tab-btn" data-view="history" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
+      히스토리
+    </button>
+    <button class="tab-btn" data-view="settings" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.4 1A8 8 0 0 0 14.5 5L14 2h-4l-.5 3a8 8 0 0 0-2 1.9l-2.4-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.4-1a8 8 0 0 0 2 1.9l.5 3h4l.5-3a8 8 0 0 0 2-1.9l2.4 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg>
+      설정
+    </button>
+  </nav>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+
+  <div id="editModal" class="modal" hidden>
+    <div class="modal-backdrop" data-close-modal></div>
+    <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="editTitle">
+      <div class="modal-head">
+        <h2 id="editTitle">기록 수정</h2>
+        <button type="button" class="modal-close" data-close-modal aria-label="닫기">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="edit-two">
+          <label><span>날짜</span><input id="editDate" type="date"></label>
+          <label><span>시작 시각</span><input id="editTime" type="time"></label>
+        </div>
+        <label><span>종류</span><select id="editCat"></select></label>
+        <label><span>업무명</span><textarea id="editContent" rows="3" maxlength="160"></textarea></label>
+        <label><span>발생 경로</span><select id="editOrigin"><option value="">기본</option><option value="request">요청받음</option><option value="self">내가 먼저 함</option></select></label>
+        <div id="editRequestFields">
+          <label><span>요청자</span><input id="editRequester" type="text" maxlength="40"></label>
+          <label><span>요청받은 시각</span><input id="editRequestedAt" type="datetime-local"></label>
+          <label><span>원래 예정일</span><input id="editDueDate" type="date"></label>
+        </div>
+        <button id="editReturnPendingBtn" class="secondary-btn full" type="button" hidden>해야 할 요청으로 되돌리기</button>
+        <label><span>프로젝트</span><input id="editProject" type="text" maxlength="60"></label>
+        <label><span>메모</span><textarea id="editMemo" rows="2" maxlength="180"></textarea></label>
+        <label class="check-line"><input id="editHighlight" type="checkbox"><span>평가 때 기억할 대표 업무</span></label>
+      </div>
+      <div class="modal-actions">
+        <button id="editDeleteBtn" class="danger-btn" type="button">삭제</button>
+        <span class="modal-spacer"></span>
+        <button class="secondary-btn" type="button" data-close-modal>취소</button>
+        <button id="editSaveBtn" class="primary-btn" type="button">저장</button>
+      </div>
+    </section>
+  </div>
 </div>
-<dialog id="editDialog" class="edit-dialog"><form method="dialog" id="editForm"><h2>기록 수정</h2><input type="hidden" id="editId"><div class="edit-grid"><label>시간<input id="editTime" type="time" required></label><label>종류<select id="editCat"><option value="업무">업무</option><option value="회의">회의</option><option value="요청">요청받은 일</option><option value="해결">해결한 문제</option><option value="기타">기타</option></select></label></div><label class="edit-content">내용<input id="editContent" type="text" maxlength="500" required></label><div class="dialog-actions"><button class="danger-link" id="editDelete" type="button">삭제</button><span></span><button class="action" id="editCancel" type="button">취소</button><button class="action primary" id="editSave" type="submit">저장</button></div></form></dialog>
-<div class="toast" id="toast" role="status" aria-live="polite" hidden></div><div class="undo" id="undoBar" role="status" aria-live="assertive" hidden><span id="undoText"></span><button id="undoBtn" type="button">실행 취소</button></div>
-<script src="app.js"></script></body></html>
+<script src="app.js"></script>
+</body>
+</html>

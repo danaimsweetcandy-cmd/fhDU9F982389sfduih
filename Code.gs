@@ -1,62 +1,285 @@
-/** 업무일지 PWA v7 backend. 모든 쓰기는 GET + query string. */
-var TOKEN='여기를_바꿔줘_아무도_모를_문자열';
-var APP_ID='worklog', SCHEMA_VERSION=7;
-var LOG_SHEET='로그', REFL_SHEET='회고';
-var LOG_HEAD=['id','날짜','시간','분류','내용','수정시각','삭제','기기ID','서버리비전'];
-var REFL_HEAD=['날짜','오늘 한 줄','어려웠던 점 & 이유','잘한 점','내일은?','수정시각','기기ID','서버리비전','필드버전JSON'];
-var PROP_STORE='WORKLOG_STORE_ID', PROP_REV='WORKLOG_REV';
+// ============================================================
+// 업무일지 PWA v8.1 백엔드
+// 기존 Log / Reflection 시트를 그대로 사용하며, 새 컬럼은 오른쪽에만 추가한다.
+// 모든 쓰기는 GET + query string 방식만 사용한다.
+// ============================================================
 
-function doGet(e){
-  var p=(e&&e.parameter)||{}, action=p.action||'ping';
-  if(action==='ping')return json_({ok:true,appId:APP_ID,schemaVersion:SCHEMA_VERSION,serverTime:Date.now()});
-  if(p.token!==TOKEN)return json_({ok:false,code:'AUTH',error:'토큰이 달라. 앱 설정과 Code.gs를 맞춰줘.'});
-  try{
-    if(action==='meta')return json_(meta_());
-    if(action==='getAll')return json_(getAll_(p.sinceRev));
-    var payload=parse_(p.payload);
-    var lock=LockService.getScriptLock();lock.waitLock(25000);
-    try{
-      var result;
-      if(action==='ADD_LOG'||action==='UPDATE_LOG')result=upsertLog_(payload);
-      else if(action==='DELETE_LOG')result=deleteLog_(payload);
-      else if(action==='UPSERT_REFLECTION')result=upsertReflectionCompat_(payload);
-      else if(action==='UPSERT_REFLECTION_FIELD')result=upsertReflectionField_(payload);
-      else if(action==='batch')result=batch_(payload.items||[]);
-      else return json_({ok:false,code:'ACTION',error:'알 수 없는 action: '+action});
-      var m=meta_();result.ok=true;result.appId=APP_ID;result.schemaVersion=SCHEMA_VERSION;result.storeId=m.storeId;result.serverTime=m.serverTime;result.cursor=m.cursor;return json_(result);
-    }finally{try{lock.releaseLock()}catch(_){}}
-  }catch(err){return json_({ok:false,code:'SERVER',error:String(err&&err.message?err.message:err)})}
+const TOKEN = "여기를_기존_토큰과_같게_바꿔줘";
+
+const LOG_SHEET = "Log";
+const REFL_SHEET = "Reflection";
+const LOG_HEADERS = [
+  "id", "date", "time", "cat", "content", "updatedAt", "deleted",
+  "origin", "requester", "requestedAt", "dueDate", "project", "memo",
+  "highlight", "status", "actualStartedAt"
+];
+const REFL_HEADERS = ["date", "summary", "difficulty", "achievement", "tomorrow", "updatedAt"];
+
+function getSheet_(name, wantedHeaders) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    sheet.getRange(1, 1, 1, wantedHeaders.length).setValues([wantedHeaders]);
+    return sheet;
+  }
+  ensureHeaders_(sheet, wantedHeaders);
+  return sheet;
 }
-function doPost(){return json_({ok:false,code:'POST_DISABLED',error:'POST는 지원하지 않아. 최신 앱은 GET 방식만 사용해.'})}
-function parse_(s){try{return JSON.parse(s||'{}')}catch(_){throw new Error('요청 형식이 이상해')}}
-function getStoreId_(){var p=PropertiesService.getScriptProperties(),id=p.getProperty(PROP_STORE);if(!id){id=Utilities.getUuid();p.setProperty(PROP_STORE,id)}return id}
-function getRev_(){return Number(PropertiesService.getScriptProperties().getProperty(PROP_REV))||0}
-function nextRev_(){var p=PropertiesService.getScriptProperties(),n=getRev_()+1;p.setProperty(PROP_REV,String(n));return n}
-function meta_(){return{ok:true,appId:APP_ID,schemaVersion:SCHEMA_VERSION,storeId:getStoreId_(),serverTime:Date.now(),cursor:getRev_()}}
-function clean_(v,max){var s=String(v==null?'':v).trim();if(s.length>max)throw new Error('입력 길이가 제한을 넘었어');return s}
-function validDate_(s){var m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s||''));if(!m)return false;var y=+m[1],mo=+m[2],d=+m[3],x=new Date(y,mo-1,d);return x.getFullYear()===y&&x.getMonth()===mo-1&&x.getDate()===d}
-function validTime_(s){return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(s||''))}
-function validStamp_(n){n=Number(n);return isFinite(n)&&n>946684800000&&n<Date.now()+7*86400000}
-function cmp_(au,ad,bu,bd){au=Number(au)||0;bu=Number(bu)||0;if(au!==bu)return au>bu?1:-1;ad=String(ad||'');bd=String(bd||'');return ad===bd?0:(ad>bd?1:-1)}
-function validateLog_(r){if(!r||!r.id)throw new Error('로그 id가 없어');if(!validDate_(r.date))throw new Error('날짜 형식이 잘못됐어');if(!validTime_(r.time))throw new Error('시간 형식이 잘못됐어');var cat=clean_(r.cat,10);if(['업무','회의','요청','해결','기타'].indexOf(cat)<0)throw new Error('분류가 잘못됐어');if(!validStamp_(r.updatedAt))throw new Error('수정시각이 잘못됐어');var content=clean_(r.content,500);if(!content&&!r.deleted)throw new Error('내용이 비어 있어');return{id:clean_(r.id,120),date:String(r.date),time:String(r.time),cat:cat,content:content,updatedAt:Number(r.updatedAt),deleted:!!r.deleted,deviceId:clean_(r.deviceId||'',120)}}
-function logSheet_(){var ss=SpreadsheetApp.getActiveSpreadsheet(),sh=findOrCreateSheet_([LOG_SHEET,'Logs','logs','업무로그'],LOG_SHEET,LOG_HEAD);ensureHead_(sh,LOG_HEAD);return sh}
-function reflSheet_(){var ss=SpreadsheetApp.getActiveSpreadsheet(),sh=findOrCreateSheet_([REFL_SHEET,'Reflections','reflections','정리'],REFL_SHEET,REFL_HEAD);ensureHead_(sh,REFL_HEAD);return sh}
-function findOrCreateSheet_(names,newName,head){var ss=SpreadsheetApp.getActiveSpreadsheet();for(var i=0;i<names.length;i++){var s=ss.getSheetByName(names[i]);if(s)return s}var sh=ss.insertSheet(newName);sh.getRange(1,1,1,head.length).setValues([head]);return sh}
-function ensureHead_(sh,head){if(sh.getLastRow()===0)sh.getRange(1,1,1,head.length).setValues([head]);else if(sh.getLastColumn()<head.length){var c=sh.getLastColumn();sh.getRange(1,c+1,1,head.length-c).setValues([head.slice(c)])}}
-function logIndex_(sh){var idx={},last=sh.getLastRow();if(last<2)return idx;var v=sh.getRange(2,1,last-1,LOG_HEAD.length).getValues();for(var i=0;i<v.length;i++)if(v[i][0])idx[String(v[i][0])]={row:i+2,updated:ms_(v[i][5]),deviceId:String(v[i][7]||''),values:v[i]};return idx}
-function upsertLog_(raw){var r=validateLog_(raw),sh=logSheet_(),idx=logIndex_(sh),old=idx[r.id];if(old&&cmp_(old.updated,old.deviceId,r.updatedAt,r.deviceId)>=0)return{saved:0,skipped:1,conflicts:[{id:r.id,serverUpdated:old.updated,serverDeviceId:old.deviceId}]};var rev=nextRev_(),line=[r.id,r.date,r.time,r.cat,r.content,new Date(r.updatedAt),r.deleted?'Y':'',r.deviceId,rev];if(old)sh.getRange(old.row,1,1,LOG_HEAD.length).setValues([line]);else sh.appendRow(line);return{saved:1,skipped:0,conflicts:[]}}
-function deleteLog_(p){if(!p||!p.id||!validStamp_(p.updatedAt))throw new Error('삭제 요청이 잘못됐어');var sh=logSheet_(),idx=logIndex_(sh),old=idx[String(p.id)],device=clean_(p.deviceId||'',120);if(old&&cmp_(old.updated,old.deviceId,p.updatedAt,device)>=0)return{saved:0,skipped:1,conflicts:[{id:String(p.id),serverUpdated:old.updated,serverDeviceId:old.deviceId}]};var rev=nextRev_();if(old){var v=old.values.slice();v[5]=new Date(Number(p.updatedAt));v[6]='Y';v[7]=device;v[8]=rev;sh.getRange(old.row,1,1,LOG_HEAD.length).setValues([v])}else{sh.appendRow([String(p.id),'','00:00','기타','',new Date(Number(p.updatedAt)),'Y',device,rev])}return{saved:1,skipped:0,conflicts:[]}}
-function reflIndex_(sh){var idx={},last=sh.getLastRow();if(last<2)return idx;var v=sh.getRange(2,1,last-1,REFL_HEAD.length).getValues();for(var i=0;i<v.length;i++)if(v[i][0])idx[String(v[i][0])]={row:i+2,values:v[i]};return idx}
-function parseVersions_(s,globalU,globalD){var o={};try{o=JSON.parse(String(s||'{}'))||{}}catch(_){};['summary','difficulty','achievement','tomorrow'].forEach(function(f){if(!o[f])o[f]={u:Number(globalU)||0,d:String(globalD||'')}});return o}
-function reflCol_(f){return{summary:1,difficulty:2,achievement:3,tomorrow:4}[f]}
-function upsertReflectionField_(p){if(!p||!validDate_(p.date))throw new Error('회고 날짜가 잘못됐어');var f=String(p.field||'');if(reflCol_(f)==null)throw new Error('회고 필드가 잘못됐어');if(!validStamp_(p.updatedAt))throw new Error('회고 수정시각이 잘못됐어');var val=clean_(p.value,700),dev=clean_(p.deviceId||'',120),sh=reflSheet_(),idx=reflIndex_(sh),old=idx[p.date];var row=old?old.values.slice():[p.date,'','','','',new Date(0),'',0,'{}'];var vers=parseVersions_(row[8],ms_(row[5]),row[6]),prev=vers[f]||{u:0,d:''};if(cmp_(prev.u,prev.d,p.updatedAt,dev)>=0)return{saved:0,skipped:1};row[reflCol_(f)]=val;vers[f]={u:Number(p.updatedAt),d:dev};var maxU=0,maxD='';Object.keys(vers).forEach(function(k){if(cmp_(vers[k].u,vers[k].d,maxU,maxD)>0){maxU=vers[k].u;maxD=vers[k].d}});row[0]=p.date;row[5]=new Date(maxU);row[6]=maxD;row[7]=nextRev_();row[8]=JSON.stringify(vers);if(old)sh.getRange(old.row,1,1,REFL_HEAD.length).setValues([row]);else sh.appendRow(row);return{saved:1,skipped:0}}
-function upsertReflectionCompat_(p){var saved=0,skipped=0;['summary','difficulty','achievement','tomorrow'].forEach(function(f){var r=upsertReflectionField_({date:p.date,field:f,value:p[f]||'',updatedAt:Number(p.updatedAt),deviceId:p.deviceId||''});saved+=r.saved||0;skipped+=r.skipped||0});return{saved:saved,skipped:skipped}}
-function batch_(items){if(!Array.isArray(items)||items.length>30)throw new Error('batch 형식이 잘못됐어');var saved=0,skipped=0,conflicts=[];for(var i=0;i<items.length;i++){var x=items[i]||{},r;if(x.action==='ADD_LOG'||x.action==='UPDATE_LOG')r=upsertLog_(x.payload);else if(x.action==='DELETE_LOG')r=deleteLog_(x.payload);else if(x.action==='UPSERT_REFLECTION_FIELD')r=upsertReflectionField_(x.payload);else throw new Error('batch action이 잘못됐어');saved+=r.saved||0;skipped+=r.skipped||0;if(r.conflicts)conflicts=conflicts.concat(r.conflicts)}return{saved:saved,skipped:skipped,conflicts:conflicts}}
-function getAll_(sinceParam){var since=Number(sinceParam),inc=isFinite(since)&&since>0,logs=[],refs={},ls=logSheet_(),rs=reflSheet_(),lv=ls.getLastRow()>1?ls.getRange(2,1,ls.getLastRow()-1,LOG_HEAD.length).getValues():[],rv=rs.getLastRow()>1?rs.getRange(2,1,rs.getLastRow()-1,REFL_HEAD.length).getValues():[];for(var i=0;i<lv.length;i++){var x=lv[i],rev=Number(x[8])||0;if(!x[0]||(inc&&(!rev||rev<=since)))continue;logs.push({id:String(x[0]),date:dateStr_(x[1]),time:timeStr_(x[2]),cat:String(x[3]||''),content:String(x[4]||''),updatedAt:ms_(x[5]),deleted:x[6]==='Y'||x[6]===true,deviceId:String(x[7]||''),revision:rev})}for(var j=0;j<rv.length;j++){var y=rv[j],rr=Number(y[7])||0;if(!y[0]||(inc&&(!rr||rr<=since)))continue;var date=dateStr_(y[0]),vers=parseVersions_(y[8],ms_(y[5]),y[6]);refs[date]={date:date,summary:String(y[1]||''),difficulty:String(y[2]||''),achievement:String(y[3]||''),tomorrow:String(y[4]||''),updatedAt:ms_(y[5]),deviceId:String(y[6]||''),revision:rr,_versions:vers}}
-  var m=meta_();return{ok:true,appId:APP_ID,schemaVersion:SCHEMA_VERSION,storeId:m.storeId,serverTime:m.serverTime,cursor:m.cursor,incremental:inc,logs:logs,reflections:refs}}
-function dateStr_(v){if(v instanceof Date)return Utilities.formatDate(v,SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone(),'yyyy-MM-dd');return String(v||'').slice(0,10)}
-function timeStr_(v){if(v instanceof Date)return Utilities.formatDate(v,SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone(),'HH:mm');var s=String(v||'');var m=s.match(/(?:T|\s)?(\d{2}):(\d{2})/);return m?m[1]+':'+m[2]:'00:00'}
-function ms_(v){return v instanceof Date?v.getTime():(Number(v)||0)}
-function json_(o){return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON)}
-function assignMissingRevisions_(sh,col){var last=sh.getLastRow();if(last<2)return;var v=sh.getRange(2,col,last-1,1).getValues(),changed=false;for(var i=0;i<v.length;i++)if(!Number(v[i][0])){v[i][0]=nextRev_();changed=true}if(changed)sh.getRange(2,col,v.length,1).setValues(v)}
-function setup(){getStoreId_();var l=logSheet_(),r=reflSheet_();assignMissingRevisions_(l,9);assignMissingRevisions_(r,8);l.getRange(1,1,1,LOG_HEAD.length).setValues([LOG_HEAD]).setFontWeight('bold').setBackground('#1F3D3A').setFontColor('#fff');r.getRange(1,1,1,REFL_HEAD.length).setValues([REFL_HEAD]).setFontWeight('bold').setBackground('#1F3D3A').setFontColor('#fff');l.setFrozenRows(1);r.setFrozenRows(1);l.getRange('B:C').setNumberFormat('@');l.getRange('F:F').setNumberFormat('yyyy-mm-dd hh:mm:ss');r.getRange('A:A').setNumberFormat('@');r.getRange('F:F').setNumberFormat('yyyy-mm-dd hh:mm:ss');l.setColumnWidth(5,360);r.setColumnWidth(2,280);r.setColumnWidth(3,320);r.setColumnWidth(4,280);r.setColumnWidth(5,280);SpreadsheetApp.getUi().alert('업무일지 v7 준비 끝. 배포 관리에서 새 버전으로 다시 배포해줘.')}
+
+// 기존 컬럼과 데이터는 건드리지 않고, 없는 헤더만 맨 오른쪽에 추가한다.
+function ensureHeaders_(sheet, wantedHeaders) {
+  const lastCol = Math.max(sheet.getLastColumn(), 1);
+  let existing = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(v => String(v || "").trim());
+  if (existing.length === 1 && existing[0] === "" && sheet.getLastRow() === 0) existing = [];
+  const missing = wantedHeaders.filter(h => !existing.includes(h));
+  if (!missing.length) return;
+  sheet.getRange(1, existing.length + 1, 1, missing.length).setValues([missing]);
+}
+
+function headerMap_(sheet) {
+  const n = Math.max(sheet.getLastColumn(), 1);
+  const headers = sheet.getRange(1, 1, 1, n).getDisplayValues()[0].map(v => String(v || "").trim());
+  const map = {};
+  headers.forEach((h, i) => { if (h) map[h] = i; });
+  return { headers, map };
+}
+
+function dateKey_(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    const tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+    return Utilities.formatDate(value, tz, "yyyy-MM-dd");
+  }
+  const s = String(value == null ? "" : value).trim();
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : s;
+}
+
+function timeKey_(rawValue, displayValue) {
+  const displayed = String(displayValue == null ? "" : displayValue).trim();
+  let m = displayed.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (m) return String(Number(m[1])).padStart(2, "0") + ":" + m[2];
+  m = displayed.match(/^(오전|오후|AM|PM)\s*(\d{1,2}):(\d{2})(?::\d{2})?$/i);
+  if (m) {
+    let h = Number(m[2]) % 12;
+    const pm = m[1] === "오후" || String(m[1]).toUpperCase() === "PM";
+    if (pm) h += 12;
+    return String(h).padStart(2, "0") + ":" + m[3];
+  }
+  const raw = String(rawValue == null ? "" : rawValue).trim();
+  m = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  return m ? String(Number(m[1])).padStart(2, "0") + ":" + m[2] : raw;
+}
+
+function bool_(v) { return v === true || v === "Y" || String(v).toLowerCase() === "true"; }
+function readAllRows_(sheet, wantedHeaders) {
+  ensureHeaders_(sheet, wantedHeaders);
+  const hm = headerMap_(sheet);
+  const values = sheet.getDataRange().getValues();
+  const displays = sheet.getDataRange().getDisplayValues();
+  if (values.length < 2) return [];
+  const out = [];
+  for (let r = 1; r < values.length; r++) {
+    if (values[r].every(c => c === "")) continue;
+    const obj = {};
+    wantedHeaders.forEach(h => {
+      const i = hm.map[h];
+      if (i === undefined) { obj[h] = ""; return; }
+      const v = values[r][i];
+      if (h === "date" || h === "dueDate") obj[h] = dateKey_(v);
+      else if (h === "time") obj[h] = timeKey_(v, displays[r][i]);
+      else if (h === "updatedAt") obj[h] = v instanceof Date ? v.getTime() : (Number(v) || 0);
+      else if (h === "deleted" || h === "highlight") obj[h] = bool_(v);
+      else obj[h] = v == null ? "" : v;
+    });
+    out.push(obj);
+  }
+  return out;
+}
+
+function findRowByValue_(sheet, header, value) {
+  const hm = headerMap_(sheet);
+  const col = hm.map[header];
+  if (col === undefined) return -1;
+  const values = sheet.getDataRange().getValues();
+  const target = String(value == null ? "" : value);
+  for (let r = 1; r < values.length; r++) {
+    const actual = header === "date" ? dateKey_(values[r][col]) : String(values[r][col] == null ? "" : values[r][col]);
+    if (actual === target) return r + 1;
+  }
+  return -1;
+}
+
+function getCellValue_(sheet, row, header) {
+  const hm = headerMap_(sheet);
+  const col = hm.map[header];
+  if (col === undefined) return "";
+  return sheet.getRange(row, col + 1).getValue();
+}
+
+function writeObjectRow_(sheet, rowNum, wantedHeaders, obj) {
+  ensureHeaders_(sheet, wantedHeaders);
+  const hm = headerMap_(sheet);
+  const width = hm.headers.length;
+  const existing = rowNum > 0 ? sheet.getRange(rowNum, 1, 1, width).getValues()[0] : new Array(width).fill("");
+  wantedHeaders.forEach(h => {
+    const i = hm.map[h];
+    if (i !== undefined) existing[i] = obj[h] !== undefined ? obj[h] : "";
+  });
+  if (rowNum > 0) sheet.getRange(rowNum, 1, 1, width).setValues([existing]);
+  else {
+    sheet.appendRow(existing);
+    rowNum = sheet.getLastRow();
+  }
+  // 날짜/시간/새 날짜형 문자열은 텍스트로 고정해 로캘 자동변환을 막는다.
+  ["date", "time", "requestedAt", "dueDate", "actualStartedAt"].forEach(h => {
+    const i = hm.map[h];
+    if (i !== undefined) sheet.getRange(rowNum, i + 1).setNumberFormat("@").setValue(obj[h] !== undefined ? obj[h] : "");
+  });
+  return rowNum;
+}
+
+function cleanLog_(p) {
+  return {
+    id: String(p.id || ""),
+    date: dateKey_(p.date),
+    time: timeKey_(p.time, p.time),
+    cat: String(p.cat || "업무"),
+    content: String(p.content || ""),
+    updatedAt: Number(p.updatedAt) || Date.now(),
+    deleted: bool_(p.deleted),
+    origin: p.origin === "request" || p.origin === "self" ? p.origin : "",
+    requester: String(p.requester || ""),
+    requestedAt: String(p.requestedAt || ""),
+    dueDate: dateKey_(p.dueDate),
+    project: String(p.project || ""),
+    memo: String(p.memo || ""),
+    highlight: bool_(p.highlight),
+    status: p.status === "pending" ? "pending" : "logged",
+    actualStartedAt: String(p.actualStartedAt || "")
+  };
+}
+
+function readObjectRow_(sheet, rowNum, wantedHeaders) {
+  ensureHeaders_(sheet, wantedHeaders);
+  const hm = headerMap_(sheet);
+  const values = sheet.getRange(rowNum, 1, 1, hm.headers.length).getValues()[0];
+  const displays = sheet.getRange(rowNum, 1, 1, hm.headers.length).getDisplayValues()[0];
+  const obj = {};
+  wantedHeaders.forEach(h => {
+    const i = hm.map[h];
+    if (i === undefined) { obj[h] = ""; return; }
+    const v = values[i];
+    if (h === "date" || h === "dueDate") obj[h] = dateKey_(v);
+    else if (h === "time") obj[h] = timeKey_(v, displays[i]);
+    else if (h === "updatedAt") obj[h] = v instanceof Date ? v.getTime() : (Number(v) || 0);
+    else if (h === "deleted" || h === "highlight") obj[h] = bool_(v);
+    else obj[h] = v == null ? "" : v;
+  });
+  return obj;
+}
+
+// 구버전 클라이언트는 신규 필드를 전혀 보내지 않는다.
+// 기존 행을 수정할 때 payload에 실제로 포함된 필드만 덮어써서
+// origin/requester/requestedAt 같은 v8+ 메타데이터가 빈 값으로 소실되지 않게 한다.
+function mergeLogPayload_(existing, payload, incomingUpdatedAt) {
+  const cleaned = cleanLog_(payload || {});
+  if (!existing) return { ...cleaned, updatedAt: incomingUpdatedAt };
+  const merged = { ...existing };
+  LOG_HEADERS.forEach(h => {
+    if (Object.prototype.hasOwnProperty.call(payload || {}, h)) merged[h] = cleaned[h];
+  });
+  merged.id = String(payload.id || existing.id || "");
+  merged.updatedAt = incomingUpdatedAt;
+  return merged;
+}
+
+function applyAction_(action, payload) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(8000);
+  try {
+    const incoming = Number(payload && payload.updatedAt) || Date.now();
+    if (action === "ADD_LOG" || action === "UPDATE_LOG") {
+      const sheet = getSheet_(LOG_SHEET, LOG_HEADERS);
+      const id = String((payload && payload.id) || "");
+      if (!id) throw new Error("id가 없어");
+      const row = findRowByValue_(sheet, "id", id);
+      let existing = null;
+      if (row !== -1) {
+        const current = Number(getCellValue_(sheet, row, "updatedAt")) || 0;
+        if (current > incoming) return { skipped:true };
+        existing = readObjectRow_(sheet, row, LOG_HEADERS);
+      }
+      const merged = mergeLogPayload_(existing, payload || {}, incoming);
+      writeObjectRow_(sheet, row, LOG_HEADERS, merged);
+      return { skipped:false };
+    }
+
+    if (action === "DELETE_LOG") {
+      const sheet = getSheet_(LOG_SHEET, LOG_HEADERS);
+      const row = findRowByValue_(sheet, "id", payload.id);
+      if (row === -1) return { skipped:true };
+      const current = Number(getCellValue_(sheet, row, "updatedAt")) || 0;
+      if (current > incoming) return { skipped:true };
+      const hm = headerMap_(sheet).map;
+      sheet.getRange(row, hm.deleted + 1).setValue(true);
+      sheet.getRange(row, hm.updatedAt + 1).setValue(incoming);
+      return { skipped:false };
+    }
+
+    if (action === "UPSERT_REFLECTION") {
+      const sheet = getSheet_(REFL_SHEET, REFL_HEADERS);
+      const date = dateKey_(payload.date);
+      const row = findRowByValue_(sheet, "date", date);
+      if (row !== -1) {
+        const current = Number(getCellValue_(sheet, row, "updatedAt")) || 0;
+        if (current > incoming) return { skipped:true };
+      }
+      const clean = {
+        date,
+        summary:String(payload.summary || ""), difficulty:String(payload.difficulty || ""),
+        achievement:String(payload.achievement || ""), tomorrow:String(payload.tomorrow || ""),
+        updatedAt:incoming
+      };
+      writeObjectRow_(sheet, row, REFL_HEADERS, clean);
+      return { skipped:false };
+    }
+    return { skipped:true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function checkToken_(e) { return !!(e && e.parameter && e.parameter.token === TOKEN); }
+function json_(obj) { return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON); }
+
+function doGet(e) {
+  const action = (e && e.parameter && e.parameter.action) || "getAll";
+  if (!checkToken_(e)) return json_({ok:false,error:"토큰이 올바르지 않아"});
+
+  if (action !== "getAll") {
+    if (!e.parameter.payload) return json_({ok:false,error:"payload가 없어"});
+    try {
+      const result = applyAction_(action, JSON.parse(e.parameter.payload));
+      return json_({ok:true,skipped:!!result.skipped});
+    } catch (err) { return json_({ok:false,error:String(err)}); }
+  }
+
+  try {
+    const logSheet = getSheet_(LOG_SHEET, LOG_HEADERS);
+    const reflSheet = getSheet_(REFL_SHEET, REFL_HEADERS);
+    const logs = readAllRows_(logSheet, LOG_HEADERS);
+    const rows = readAllRows_(reflSheet, REFL_HEADERS);
+    const reflections = {};
+    rows.forEach(r => {
+      if (!r.date) return;
+      const prev = reflections[r.date];
+      if (!prev || Number(r.updatedAt || 0) >= Number(prev.updatedAt || 0)) reflections[r.date] = r;
+    });
+    return json_({ok:true,logs,reflections});
+  } catch (err) { return json_({ok:false,error:String(err)}); }
+}
+
+function doPost() {
+  return json_({ok:false,error:"POST는 지원하지 않아. GET을 사용해줘."});
+}
