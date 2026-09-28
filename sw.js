@@ -1,4 +1,4 @@
-const CACHE_NAME = "worklog-cache-v8-1";
+const CACHE_NAME = "worklog-cache-v8-1-1";
 const APP_SHELL = [
   "./",
   "./index.html",
