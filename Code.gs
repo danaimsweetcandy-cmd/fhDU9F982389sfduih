@@ -1,5 +1,5 @@
 // ============================================================
-// 업무일지 PWA v8.3 백엔드
+// 업무일지 PWA v8.4 백엔드
 // - 기존 Log / 로그, Reflection / 회고 데이터 하위 호환
 // - 모든 쓰기는 GET + query string
 // - 수정시각 + deviceId 버전 비교, tombstone, revision 증분 동기화
@@ -19,7 +19,7 @@ const REVISION_KEY = "worklog_revision";
 const LOG_HEADERS = [
   "id", "date", "time", "cat", "content", "updatedAt", "deleted",
   "origin", "requester", "requestedAt", "dueDate", "project", "memo",
-  "highlight", "status", "actualStartedAt", "solved", "deviceId", "rev"
+  "highlight", "status", "actualStartedAt", "solved", "deviceId", "rev", "meeting", "support"
 ];
 const REFL_HEADERS = [
   "date", "summary", "difficulty", "achievement", "tomorrow", "updatedAt",
@@ -136,12 +136,18 @@ function bool_(value) {
   return value === true || value === 1 || value === "1" || value === "Y" || String(value).toLowerCase() === "true";
 }
 
-// solved는 기존 데이터의 빈칸과 명시적인 false를 구분해야 한다.
+// 독립 태그는 구버전의 빈칸과 명시적인 false를 구분해야 한다.
 function triBool_(value) {
   if (value === "" || value === null || value === undefined) return "";
   if (value === true || value === 1 || value === "1" || value === "Y" || String(value).toLowerCase() === "true") return true;
   if (value === false || value === 0 || value === "0" || value === "N" || String(value).toLowerCase() === "false") return false;
   return "";
+}
+
+function payloadTriBool_(value, field) {
+  const out = triBool_(value);
+  if (out === "" && value !== "" && value !== null && value !== undefined) throw new Error(field + " 값이 올바르지 않아");
+  return out;
 }
 
 function dateKey_(value) {
@@ -180,7 +186,7 @@ function normalizeCell_(header, value, displayValue) {
     const n = Number(value);
     return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
   }
-  if (header === "solved") return triBool_(value);
+  if (header === "solved" || header === "meeting" || header === "support") return triBool_(value);
   if (header === "deleted" || header === "highlight") return bool_(value);
   return value == null ? "" : value;
 }
@@ -325,7 +331,9 @@ function cleanLogPayload_(payload, requireCore) {
   if (Object.prototype.hasOwnProperty.call(p, "actualStartedAt")) {
     const v = validDateTime_(p.actualStartedAt, true); if (v === null) throw new Error("실제 시작 시각이 올바르지 않아"); out.actualStartedAt = v;
   }
-  if (Object.prototype.hasOwnProperty.call(p, "solved")) out.solved = triBool_(p.solved);
+  if (Object.prototype.hasOwnProperty.call(p, "solved")) out.solved = payloadTriBool_(p.solved, "문제해결");
+  if (Object.prototype.hasOwnProperty.call(p, "meeting")) out.meeting = payloadTriBool_(p.meeting, "회의");
+  if (Object.prototype.hasOwnProperty.call(p, "support")) out.support = payloadTriBool_(p.support, "협업·지원");
   if (Object.prototype.hasOwnProperty.call(p, "deviceId")) out.deviceId = text_(p.deviceId, 100, "deviceId", true);
   return out;
 }
@@ -349,6 +357,8 @@ function defaultLog_(cleaned) {
     status: cleaned.status === "pending" ? "pending" : "logged",
     actualStartedAt: cleaned.actualStartedAt || "",
     solved: cleaned.solved === undefined ? "" : cleaned.solved,
+    meeting: cleaned.meeting === undefined ? "" : cleaned.meeting,
+    support: cleaned.support === undefined ? "" : cleaned.support,
     deviceId: cleaned.deviceId || "",
     rev: 0
   };
@@ -359,8 +369,9 @@ function mergeLogPayload_(existing, payload) {
   if (!existing) return defaultLog_(cleaned);
   const merged = { ...existing };
   Object.keys(cleaned).forEach(k => { merged[k] = cleaned[k]; });
-  // 구버전 클라이언트는 solved를 모르지만 cat=해결은 명시적인 문제해결 의미다.
+  // 구버전 클라이언트는 독립 태그를 모르지만 기존 cat=해결/회의 의미는 보존한다.
   if (!Object.prototype.hasOwnProperty.call(payload || {}, "solved") && cleaned.cat === "해결") merged.solved = "";
+  if (!Object.prototype.hasOwnProperty.call(payload || {}, "meeting") && cleaned.cat === "회의") merged.meeting = "";
   return merged;
 }
 
@@ -474,6 +485,7 @@ function responseBase_() {
   return {
     appId: APP_ID,
     schemaVersion: SCHEMA_VERSION,
+    capabilities: ["contextFlagsV1"],
     storeId: storeId_(),
     serverTime: Date.now(),
     revision: currentRevision_()

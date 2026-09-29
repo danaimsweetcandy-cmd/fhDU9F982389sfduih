@@ -1,11 +1,12 @@
 // ============================================================
-// 업무일지 PWA v8.3
+// 업무일지 PWA v8.4
 // 기록은 가볍게, 데이터는 보수적으로 보존하는 출시 후보
 // ============================================================
 const CONFIG = { GAS_URL: "PUT_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE" };
-const APP_VERSION = "8.3.0";
+const APP_VERSION = "8.4.0";
 const APP_ID = "dayeon-worklog";
 const API_SCHEMA_VERSION = 3;
+const REQUIRED_SERVER_CAPABILITY = "contextFlagsV1";
 
 const LS_LOGS = "worklog_logs";
 const LS_REFL = "worklog_reflections";
@@ -52,6 +53,7 @@ const TAB_ID = "tab-" + Math.random().toString(36).slice(2) + Date.now().toStrin
 let DEVICE_ID = "";
 let lastMutationAt = 0;
 let sharedChannel = null;
+let serverCapabilityVerified = false;
 
 function $(id) { return document.getElementById(id); }
 function uid() {
@@ -169,14 +171,20 @@ function boolValue(v) { return v===true||v===1||v==="1"||v==="Y"||String(v).toLo
 function normalizeLog(raw) {
   if(!raw||typeof raw!=="object")return null;
   const id=String(raw.id||"").trim(), date=normalizeDateStr(raw.date); if(!id||!date)return null;
-  const cat=String(raw.cat||"업무"), hasSolved=raw.solved!==undefined&&raw.solved!==null&&raw.solved!=="";
+  const cat=String(raw.cat||"업무");
+  const hasSolved=raw.solved!==undefined&&raw.solved!==null&&raw.solved!=="";
+  const hasMeeting=raw.meeting!==undefined&&raw.meeting!==null&&raw.meeting!=="";
+  const hasSupport=raw.support!==undefined&&raw.support!==null&&raw.support!=="";
   const origin=raw.origin==="request"||raw.origin==="self"?raw.origin:"";
   let status=raw.status==="pending"?"pending":"logged"; if(status==="pending"&&origin!=="request")status="logged";
   const updated=Number(raw.updatedAt);
   return {...raw,id,date,time:normalizeTimeStr(raw.time)||"00:00",cat,content:String(raw.content||""),
     updatedAt:Number.isFinite(updated)&&updated>=0?updated:0,deleted:boolValue(raw.deleted),origin,requester:String(raw.requester||""),
     requestedAt:normalizeDateTimeLocal(raw.requestedAt),dueDate:normalizeDateStr(raw.dueDate),project:String(raw.project||""),memo:String(raw.memo||""),
-    solved:hasSolved?boolValue(raw.solved):cat==="해결",highlight:boolValue(raw.highlight),status,
+    solved:hasSolved?boolValue(raw.solved):cat==="해결",
+    meeting:hasMeeting?boolValue(raw.meeting):cat==="회의",
+    support:hasSupport?boolValue(raw.support):false,
+    highlight:boolValue(raw.highlight),status,
     actualStartedAt:normalizeDateTimeLocal(raw.actualStartedAt),deviceId:String(raw.deviceId||""),rev:Number(raw.rev)||0};
 }
 function normalizeReflection(raw,key) {
@@ -253,6 +261,7 @@ function validateEnvelope(data,expectedStoreId) {
   if(!data||typeof data!=="object")throw new SyncError("서버 응답 형식이 올바르지 않아","BAD_RESPONSE");
   if(data.appId!==APP_ID)throw new SyncError("업무일지용 Apps Script가 아니야","WRONG_APP");
   if(Number(data.schemaVersion)!==API_SCHEMA_VERSION)throw new SyncError("앱과 Apps Script 버전이 맞지 않아","SCHEMA_MISMATCH");
+  if(!Array.isArray(data.capabilities)||!data.capabilities.includes(REQUIRED_SERVER_CAPABILITY))throw new SyncError("Apps Script를 v8.4 버전으로 먼저 업데이트해줘","SERVER_UPDATE_REQUIRED");
   if(!data.storeId)throw new SyncError("시트 식별값이 없어","BAD_RESPONSE");
   if(expectedStoreId&&data.storeId!==expectedStoreId)throw new SyncError("현재 연결된 시트와 다른 시트야","WRONG_STORE");
   const serverTime=Number(data.serverTime); if(Number.isFinite(serverTime))state.clockSkewMs=Date.now()-serverTime;
@@ -283,6 +292,12 @@ async function gasCall(action,payload,params={},options={}) {
     catch(e){last=e;if(!(e instanceof SyncError)||!e.transient||attempt===2)throw e; await new Promise(r=>setTimeout(r,[350,900,1800][attempt]+Math.floor(Math.random()*250)));}
   }
   throw last;
+}
+async function verifyServerCompatibility() {
+  if(serverCapabilityVerified)return true;
+  await gasCall("meta");
+  serverCapabilityVerified=true;
+  return true;
 }
 async function flushOutbox() {
   const snapshot=getOutbox(); if(!snapshot.length)return true; flushing=true; let failed=false; lastSyncError="";
@@ -317,6 +332,7 @@ async function syncNow(quiet=false,options={}) {
   if(!acquireSyncLease()){setSyncDot(getOutbox().length?"pending":"ok");if(!quiet)toast("다른 창에서 동기화 중이야");return false;}
   setSyncDot("syncing"); syncRunning=true; let flushed=false,pulled=false;
   try{
+    try{await verifyServerCompatibility();}catch(e){lastSyncError=e&&e.message||"Apps Script 호환성 확인 실패";setSyncDot("error");if(!quiet)toast(lastSyncError);return false;}
     flushed=await flushOutbox(); renewSyncLease();
     try{pulled=await fetchAndMergeAll(!!options.forceFull);}catch(e){lastSyncError=e&&e.message||"동기화 실패";pulled=false;}
     const ok=flushed&&pulled&&!getOutbox().length;
@@ -328,6 +344,7 @@ async function syncNow(quiet=false,options={}) {
 }
 async function connectGas(url,token) {
   const u=String(url||"").trim(),t=String(token||"").trim(); if(!u)return {ok:false,message:"웹 앱 URL을 입력해줘."};
+  serverCapabilityVerified=false;
   try{
     const meta=await gasCall("meta",undefined,{}, {url:u,token:t,expectedStoreId:null});
     await gasCall("probe",undefined,{}, {url:u,token:t,expectedStoreId:meta.storeId});
@@ -337,14 +354,14 @@ async function connectGas(url,token) {
     if(switchStore){let box=[];for(const l of state.logs){box=enqueueInBox(box,l.deleted?"DELETE_LOG":"UPDATE_LOG",l.deleted?{id:l.id,updatedAt:l.updatedAt,deviceId:l.deviceId||DEVICE_ID}:logPayload(l));}
       for(const r of Object.values(state.reflections))box=enqueueInBox(box,"UPSERT_REFLECTION",reflectionPayload(r));changes[LS_OUTBOX]=JSON.stringify(box);}
     if(!commitStorageChanges(changes))return {ok:false,message:"연결 정보를 기기에 저장하지 못했어."};
-    state.serverStoreId=meta.storeId; const synced=await syncNow(true,{forceFull:true}); return {ok:synced,message:synced?"연결됨":"연결은 확인했지만 데이터 동기화에 실패했어."};
+    state.serverStoreId=meta.storeId; serverCapabilityVerified=true; const synced=await syncNow(true,{forceFull:true}); return {ok:synced,message:synced?"연결됨":"연결은 확인했지만 데이터 동기화에 실패했어."};
   }catch(e){return {ok:false,message:e&&e.message||"연결 실패"};}
 }
 function logPayload(item) {
   const x=normalizeLog(item); if(!x)throw new Error("잘못된 기록이야");
   return {id:x.id,date:x.date,time:x.time,cat:x.cat,content:x.content,updatedAt:x.updatedAt,deleted:!!x.deleted,origin:x.origin,requester:x.requester,
-    requestedAt:x.requestedAt,dueDate:x.dueDate,project:x.project,memo:x.memo,solved:!!x.solved,highlight:!!x.highlight,status:x.status,
-    actualStartedAt:x.actualStartedAt,deviceId:x.deviceId||DEVICE_ID};
+    requestedAt:x.requestedAt,dueDate:x.dueDate,project:x.project,memo:x.memo,solved:!!x.solved,meeting:!!x.meeting,support:!!x.support,
+    highlight:!!x.highlight,status:x.status,actualStartedAt:x.actualStartedAt,deviceId:x.deviceId||DEVICE_ID};
 }
 function reflectionPayload(r) { const x=normalizeReflection(r,r&&r.date); if(!x)throw new Error("잘못된 회고야"); return {...x,deviceId:x.deviceId||DEVICE_ID}; }
 
@@ -362,7 +379,9 @@ function resetQuickMeta() {
   $("requestFields").hidden = true;
   $("requestDueDate").hidden = true;
   $("requesterInput").value = "";
+  $("quickMeeting").checked = false;
   $("quickSolved").checked = false;
+  $("quickSupport").checked = false;
   $("quickProject").value = "";
   $("quickMemo").value = "";
   const d = document.querySelector(".extra-details"); if (d) d.open = false;
@@ -373,7 +392,8 @@ function addQuickLog() {
   const pending=state.activeOrigin==="request"&&state.requestWhen!=="now";
   const item=normalizeLog({id:uid(),date:pending?dueDate:state.currentDate,time:nowTimeStr(now),cat:"업무",content,origin:state.activeOrigin,
     requester:state.activeOrigin==="request"?$("requesterInput").value.trim():"",requestedAt,dueDate,project:$("quickProject").value.trim(),memo:$("quickMemo").value.trim(),
-    solved:$("quickSolved").checked,highlight:false,status:pending?"pending":"logged",actualStartedAt:pending?"":`${state.currentDate}T${nowTimeStr(now)}`,
+    meeting:$("quickMeeting").checked,solved:$("quickSolved").checked,support:$("quickSupport").checked,
+    highlight:false,status:pending?"pending":"logged",actualStartedAt:pending?"":`${state.currentDate}T${nowTimeStr(now)}`,
     updatedAt:mutationTimestamp(),deleted:false,deviceId:DEVICE_ID});
   if(!item){toast("기록 값이 올바르지 않아");return;}
   const next=[...state.logs,item]; if(!persistLogAndQueue(next,"ADD_LOG",logPayload(item)))return;
@@ -452,7 +472,9 @@ function requesterOptions() {
 }
 function logMetaHtml(item) {
   const tags = [];
+  if (item.meeting) tags.push(`<span class="mini-tag meeting">회의</span>`);
   if (item.solved) tags.push(`<span class="mini-tag solved">문제해결</span>`);
+  if (item.support) tags.push(`<span class="mini-tag support">협업·지원</span>`);
   if (item.origin === "request") {
     tags.push(`<span class="mini-tag request">요청받음${item.requester ? " · " + escapeHtml(item.requester) : ""}</span>`);
     if (item.requestedAt) tags.push(`<span class="mini-tag">${escapeHtml(formatDateTime(item.requestedAt))} 요청</span>`);
@@ -464,10 +486,11 @@ function logMetaHtml(item) {
   return tags.join("");
 }
 function logRowHtml(item) {
-  const legacyLabel = item.cat && item.cat !== "업무" && !(item.cat === "해결" && item.solved)
+  const legacyRepresentedByFlag = (item.cat === "해결" && item.solved) || (item.cat === "회의" && item.meeting);
+  const legacyLabel = item.cat && item.cat !== "업무" && !legacyRepresentedByFlag
     ? `<strong>${escapeHtml(CAT_LABEL[item.cat] || item.cat)}</strong> `
     : "";
-  return `<div class="log-item" data-cat="${escapeAttr(item.cat)}" data-solved="${item.solved ? "true" : "false"}" data-id="${escapeAttr(item.id)}">
+  return `<div class="log-item" data-cat="${escapeAttr(item.cat)}" data-solved="${item.solved ? "true" : "false"}" data-meeting="${item.meeting ? "true" : "false"}" data-support="${item.support ? "true" : "false"}" data-id="${escapeAttr(item.id)}">
     <div class="log-time">${escapeHtml(item.time)}</div><div class="log-bar"></div>
     <div class="log-main"><div class="log-title">${legacyLabel}${escapeHtml(item.content)}</div>
       ${logMetaHtml(item) ? `<div class="log-tags">${logMetaHtml(item)}</div>` : ""}
@@ -496,7 +519,7 @@ function renderToday() {
     const when = due === todayStr() ? "오늘" : due === addDays(todayStr(),1) ? "내일" : formatShortDate(due);
     return `<article class="pending-card" data-id="${escapeAttr(x.id)}">
       <div class="pending-main"><div class="pending-title">${escapeHtml(x.content)}</div>
-      <div class="pending-meta">${x.requester ? escapeHtml(x.requester) + " · " : ""}${x.requestedAt ? formatDateTime(x.requestedAt) + " 요청 · " : ""}<span class="pending-due${overdue ? " overdue" : ""}">${overdue ? "기한 지남 · " : ""}${escapeHtml(when)}</span>${x.solved ? " · 문제해결" : ""}${x.project ? " · " + escapeHtml(x.project) : ""}</div></div>
+      <div class="pending-meta">${x.requester ? escapeHtml(x.requester) + " · " : ""}${x.requestedAt ? formatDateTime(x.requestedAt) + " 요청 · " : ""}<span class="pending-due${overdue ? " overdue" : ""}">${overdue ? "기한 지남 · " : ""}${escapeHtml(when)}</span>${x.meeting ? " · 회의" : ""}${x.solved ? " · 문제해결" : ""}${x.support ? " · 협업·지원" : ""}${x.project ? " · " + escapeHtml(x.project) : ""}</div></div>
       <button class="start-btn" data-start="${escapeAttr(x.id)}">시작</button>
       <div class="pending-actions"><button class="text-btn" data-tomorrow="${escapeAttr(x.id)}">+1일</button><button class="text-btn" data-edit="${escapeAttr(x.id)}">수정</button></div>
     </article>`;
@@ -524,7 +547,9 @@ function renderSummary() {
   const highlights = rows.filter(x => x.highlight);
   const self = rows.filter(x => x.origin === "self");
   const requestsProcessed = rows.filter(x => x.origin === "request" || x.cat === "요청");
+  const meetings = rows.filter(x => x.meeting);
   const solved = rows.filter(x => x.solved);
+  const supports = rows.filter(x => x.support);
   const projects = {};
   rows.forEach(x => { if (x.project) projects[x.project] = (projects[x.project] || 0) + 1; });
   const projectEntries = Object.entries(projects).sort((a,b) => b[1]-a[1]);
@@ -532,8 +557,11 @@ function renderSummary() {
 
   const list = arr => arr.length ? `<div class="summary-list">${arr.map(x => {
     const meta = [formatShortDate(x.date)];
-    if (x.cat && x.cat !== "업무" && !(x.cat === "해결" && x.solved)) meta.push(CAT_LABEL[x.cat] || x.cat);
+    const legacyRepresentedByFlag = (x.cat === "해결" && x.solved) || (x.cat === "회의" && x.meeting);
+    if (x.cat && x.cat !== "업무" && !legacyRepresentedByFlag) meta.push(CAT_LABEL[x.cat] || x.cat);
+    if (x.meeting) meta.push("회의");
     if (x.solved) meta.push("문제해결");
+    if (x.support) meta.push("협업·지원");
     if (x.requester) meta.push(x.requester);
     if (x.project) meta.push(x.project);
     return `<div class="summary-item"><div class="title">${escapeHtml(x.content)}</div><div class="meta">${meta.map(escapeHtml).join(" · ")}</div></div>`;
@@ -547,10 +575,15 @@ function renderSummary() {
       <div class="metric"><strong>${requestsReceived.length}</strong><span>요청받음</span></div>
       <div class="metric"><strong>${requestsProcessed.length}</strong><span>요청 처리</span></div>
       <div class="metric"><strong>${self.length}</strong><span>내가 먼저 함</span></div>
+      <div class="metric"><strong>${meetings.length}</strong><span>회의</span></div>
+      <div class="metric"><strong>${solved.length}</strong><span>문제해결</span></div>
+      <div class="metric"><strong>${supports.length}</strong><span>협업·지원</span></div>
       <div class="metric"><strong>${pendingCreated.length}</strong><span>요청 중 대기</span></div>
     </div></section>
     <section class="summary-card"><h2>내가 먼저 챙긴 일</h2>${list(self)}</section>
     <section class="summary-card"><h2>해결한 문제</h2>${list(solved)}</section>
+    <section class="summary-card"><h2>협업·지원</h2>${list(supports)}</section>
+    <section class="summary-card"><h2>회의 기록</h2>${list(meetings)}</section>
     <section class="summary-card"><h2>프로젝트·회사 기여</h2>${projectEntries.length ? `<div class="project-chips">${projectEntries.map(([p,n]) => `<span class="project-chip">${escapeHtml(p)} · ${n}</span>`).join("")}</div>` : `<div class="summary-empty">프로젝트를 적은 기록이 아직 없어.</div>`}</section>
     <section class="summary-card"><h2>회고에서 남긴 성장·부담 신호</h2>${reflEntries.length ? `<div class="reflection-month">${reflEntries.map(r => `<div class="entry"><div class="date">${formatShortDate(r.date)}</div>${r.achievement ? `<div class="text"><strong>잘한 점</strong> ${escapeHtml(r.achievement)}</div>` : ""}${r.difficulty ? `<div class="text"><strong>힘들었던 점</strong> ${escapeHtml(r.difficulty)}</div>` : ""}</div>`).join("")}</div>` : `<div class="summary-empty">작성한 회고가 없어.</div>`}</section>`;
 }
@@ -567,7 +600,9 @@ function renderHistory(filter = $("searchInput").value || "") {
     if (!q) return true;
     const items = logsForDate(date);
     const r = getReflection(date);
-    return [...items.map(x => [x.content,x.requester,x.project,x.memo,CAT_LABEL[x.cat]||x.cat,x.solved ? "문제해결 해결한 문제" : ""].join(" ")), r.summary,r.difficulty,r.achievement,r.tomorrow].join(" ").toLowerCase().includes(q);
+    return [...items.map(x => [x.content,x.requester,x.project,x.memo,CAT_LABEL[x.cat]||x.cat,
+      x.meeting ? "회의 미팅" : "",x.solved ? "문제해결 해결한 문제" : "",x.support ? "협업·지원 협업 지원 도움" : ""].join(" ")),
+      r.summary,r.difficulty,r.achievement,r.tomorrow].join(" ").toLowerCase().includes(q);
   });
   if (!dates.length) { $("histList").innerHTML = `<div class="hist-empty">검색되는 기록이 없어.</div>`; return; }
   $("histList").innerHTML = dates.map(date => {
@@ -620,7 +655,9 @@ function openEdit(id) {
   $("editDueDate").value = item.dueDate;
   $("editProject").value = item.project;
   $("editMemo").value = item.memo;
+  $("editMeeting").checked = !!item.meeting;
   $("editSolved").checked = !!item.solved;
+  $("editSupport").checked = !!item.support;
   $("editHighlight").checked = !!item.highlight;
   $("editRequestFields").hidden = item.origin !== "request";
   $("editReturnPendingBtn").hidden = !(item.origin === "request" && item.status !== "pending");
@@ -640,7 +677,8 @@ function saveEdit() {
   const origin=$("editOrigin").value,date=normalizeDateStr($("editDate").value),time=normalizeTimeStr($("editTime").value);if(!date||!time){toast("날짜나 시간이 올바르지 않아");return;}
   let status=item.status; if(origin!=="request"&&status==="pending")status="logged";
   const fields={date,time,content,origin,status,requester:origin==="request"?$("editRequester").value.trim():"",requestedAt:origin==="request"?$("editRequestedAt").value:"",
-    dueDate:origin==="request"?$("editDueDate").value:"",project:$("editProject").value.trim(),memo:$("editMemo").value.trim(),solved:$("editSolved").checked,
+    dueDate:origin==="request"?$("editDueDate").value:"",project:$("editProject").value.trim(),memo:$("editMemo").value.trim(),
+    meeting:$("editMeeting").checked,solved:$("editSolved").checked,support:$("editSupport").checked,
     highlight:$("editHighlight").checked,actualStartedAt:status==="pending"?"":`${date}T${time}`};
   if(!updateLog(id,fields))return;closeEdit();renderCurrentView();toast("수정했어");
 }
@@ -651,9 +689,9 @@ function downloadBackup() {
   downloadText(`업무일지_백업_${todayStr()}.json`,JSON.stringify(data,null,2),"application/json;charset=utf-8");
 }
 function downloadCsv(){
-  const head=["날짜","시간","업무명","발생경로","요청자","예정일","프로젝트","메모","문제해결","대표업무","기존종류","상태","삭제"];
+  const head=["날짜","시간","업무명","발생경로","요청자","예정일","프로젝트","메모","회의","문제해결","협업·지원","대표업무","기존종류","상태","삭제"];
   const q=v=>`"${String(v??"").replace(/"/g,'""')}"`;
-  const rows=state.logs.slice().sort((a,b)=>a.date.localeCompare(b.date)||a.time.localeCompare(b.time)).map(x=>[x.date,x.time,x.content,x.origin,x.requester,x.dueDate,x.project,x.memo,x.solved?"Y":"",x.highlight?"Y":"",x.cat,x.status,x.deleted?"Y":""].map(q).join(","));
+  const rows=state.logs.slice().sort((a,b)=>a.date.localeCompare(b.date)||a.time.localeCompare(b.time)).map(x=>[x.date,x.time,x.content,x.origin,x.requester,x.dueDate,x.project,x.memo,x.meeting?"Y":"",x.solved?"Y":"",x.support?"Y":"",x.highlight?"Y":"",x.cat,x.status,x.deleted?"Y":""].map(q).join(","));
   downloadText(`업무일지_${todayStr()}.csv`,[head.map(q).join(","),...rows].join("\r\n"),"text/csv;charset=utf-8",true);
 }
 function previewAndRestoreBackup(data){
@@ -725,7 +763,10 @@ function bindEvents() {
 
   window.addEventListener("online",()=>syncNow(true));
   window.addEventListener("offline",()=>setSyncDot(isGasUrlSet()?"offline":""));
-  window.addEventListener("storage",e=>{if([LS_LOGS,LS_REFL,LS_OUTBOX].includes(e.key))reloadSharedState();});
+  window.addEventListener("storage",e=>{
+    if([LS_LOGS,LS_REFL,LS_OUTBOX].includes(e.key))reloadSharedState();
+    if([LS_GAS_URL,LS_GAS_TOKEN,LS_STORE_ID].includes(e.key)){serverCapabilityVerified=false;refreshSyncState();}
+  });
   window.addEventListener("popstate",e=>{if(!$("editModal").hidden)closeEdit(true);const v=e.state&&e.state.view;if(v)switchView(v,false);});
   document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"){if(state.currentView==="today"&&state.followToday)state.currentDate=todayStr();reloadSharedState();syncNow(true);}});
 }

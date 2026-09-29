@@ -47,7 +47,11 @@
           <button class="origin-chip" data-origin="self" type="button">내가 먼저 함</button>
         </div>
 
-        <label class="quick-solved"><input id="quickSolved" type="checkbox"><span>문제해결</span></label>
+        <div class="quick-flags" role="group" aria-label="업무 맥락 태그">
+          <label class="quick-flag meeting"><input id="quickMeeting" type="checkbox"><span>회의</span></label>
+          <label class="quick-flag solved"><input id="quickSolved" type="checkbox"><span>문제해결</span></label>
+          <label class="quick-flag support"><input id="quickSupport" type="checkbox"><span>협업·지원</span></label>
+        </div>
 
         <div id="requestFields" class="request-fields" hidden>
           <div class="request-line">
@@ -215,7 +219,11 @@
         <button id="editReturnPendingBtn" class="secondary-btn full" type="button" hidden>해야 할 요청으로 되돌리기</button>
         <label><span>프로젝트</span><input id="editProject" type="text" maxlength="120"></label>
         <label><span>메모</span><textarea id="editMemo" rows="2" maxlength="500"></textarea></label>
-        <label class="check-line"><input id="editSolved" type="checkbox"><span>문제해결</span></label>
+        <div class="edit-flags" role="group" aria-label="업무 맥락 태그">
+          <label class="check-line"><input id="editMeeting" type="checkbox"><span>회의</span></label>
+          <label class="check-line"><input id="editSolved" type="checkbox"><span>문제해결</span></label>
+          <label class="check-line"><input id="editSupport" type="checkbox"><span>협업·지원</span></label>
+        </div>
         <label class="check-line"><input id="editHighlight" type="checkbox"><span>평가 때 기억할 대표 업무</span></label>
       </div>
       <div class="modal-actions">
