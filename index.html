@@ -35,9 +35,11 @@
 
       <section class="quick-add" aria-label="빠른 기록">
         <div class="add-row">
-          <input id="quickContent" class="content-input" type="text" maxlength="160" autocomplete="off" enterkeyhint="done" placeholder="무슨 일을 했어?" aria-label="업무명">
+          <input id="quickContent" class="content-input" type="text" maxlength="500" autocomplete="off" enterkeyhint="done" placeholder="무슨 일을 했어?" aria-label="업무명">
           <button id="quickAddBtn" class="add-btn" type="button">저장</button>
         </div>
+
+        <button id="recordingDateHint" class="recording-date-hint" type="button" hidden></button>
 
         <div class="origin-row" role="group" aria-label="업무 발생 경로">
           <button class="origin-chip active" data-origin="" type="button">기본</button>
@@ -49,7 +51,7 @@
 
         <div id="requestFields" class="request-fields" hidden>
           <div class="request-line">
-            <input id="requesterInput" type="text" maxlength="40" list="requesterList" autocomplete="off" placeholder="요청자 이름" aria-label="요청자 이름">
+            <input id="requesterInput" type="text" maxlength="80" list="requesterList" autocomplete="off" placeholder="요청자 이름" aria-label="요청자 이름">
             <datalist id="requesterList"></datalist>
           </div>
           <div class="when-row" role="group" aria-label="언제 할 요청인지">
@@ -65,8 +67,8 @@
         <details class="extra-details">
           <summary>추가 정보</summary>
           <div class="extra-grid">
-            <input id="quickProject" type="text" maxlength="60" autocomplete="off" placeholder="프로젝트 (선택)" aria-label="프로젝트">
-            <input id="quickMemo" type="text" maxlength="180" autocomplete="off" placeholder="메모 (선택)" aria-label="메모">
+            <input id="quickProject" type="text" maxlength="120" autocomplete="off" placeholder="프로젝트 (선택)" aria-label="프로젝트">
+            <input id="quickMemo" type="text" maxlength="500" autocomplete="off" placeholder="메모 (선택)" aria-label="메모">
           </div>
         </details>
       </section>
@@ -95,19 +97,19 @@
         <div class="fields">
           <div class="field">
             <label for="fSummary">한 줄 요약</label>
-            <textarea id="fSummary" maxlength="160" placeholder="오늘의 핵심"></textarea>
+            <textarea id="fSummary" maxlength="500" placeholder="오늘의 핵심"></textarea>
           </div>
           <div class="field">
             <label for="fDifficulty">힘들었던 점과 이유</label>
-            <textarea id="fDifficulty" maxlength="160" placeholder="번아웃 신호나 방해 요인이 있었는지"></textarea>
+            <textarea id="fDifficulty" maxlength="500" placeholder="번아웃 신호나 방해 요인이 있었는지"></textarea>
           </div>
           <div class="field">
             <label for="fAchievement">잘한 점</label>
-            <textarea id="fAchievement" maxlength="160" placeholder="오늘 해낸 것, 성장한 점"></textarea>
+            <textarea id="fAchievement" maxlength="500" placeholder="오늘 해낸 것, 성장한 점"></textarea>
           </div>
           <div class="field">
             <label for="fTomorrow">내일은?</label>
-            <textarea id="fTomorrow" maxlength="160" placeholder="이어갈 것"></textarea>
+            <textarea id="fTomorrow" maxlength="500" placeholder="이어갈 것"></textarea>
           </div>
           <div id="saveHint" class="save-hint">&nbsp;</div>
         </div>
@@ -145,18 +147,25 @@
           <h2>구글 시트 연동</h2>
           <p class="setting-help">기존 업무일지의 URL과 토큰을 그대로 사용해. 새 Code.gs는 기존 시트의 행을 지우지 않고 필요한 컬럼만 뒤에 추가해.</p>
           <label class="field single"><span>Apps Script 웹 앱 URL</span><textarea id="gasUrlInput" rows="3" placeholder="https://script.google.com/macros/s/.../exec"></textarea></label>
-          <label class="field single"><span>API 토큰</span><input id="gasTokenInput" type="text" autocomplete="off" placeholder="Code.gs의 TOKEN과 같은 값"></label>
+          <label class="field single"><span>API 토큰</span><div class="token-row"><input id="gasTokenInput" type="password" autocomplete="off" placeholder="Code.gs의 TOKEN과 같은 값"><button id="tokenToggle" class="text-btn" type="button">보기</button></div></label>
           <div class="settings-actions">
             <button id="gasUrlSave" class="primary-btn" type="button">저장 및 연결 확인</button>
             <button id="syncNowBtn" class="secondary-btn" type="button">지금 동기화</button>
+            <button id="fullResyncBtn" class="secondary-btn" type="button">전체 다시 맞추기</button>
           </div>
           <div id="gasStatusText" class="setting-status">&nbsp;</div>
+          <div id="syncDetailText" class="setting-status"></div>
         </section>
 
         <section class="setting-card">
           <h2>데이터</h2>
           <p id="dataStatusText" class="setting-help"></p>
-          <button id="exportBackupBtn" class="secondary-btn full" type="button">기기 백업 JSON 저장</button>
+          <div class="settings-actions data-actions">
+            <button id="exportBackupBtn" class="secondary-btn" type="button">백업 JSON 저장</button>
+            <button id="importBackupBtn" class="secondary-btn" type="button">백업 불러오기</button>
+            <button id="exportCsvBtn" class="secondary-btn" type="button">CSV 저장</button>
+          </div>
+          <input id="importBackupFile" type="file" accept="application/json,.json" hidden>
         </section>
       </div>
     </section>
@@ -196,16 +205,16 @@
           <label><span>시작 시각</span><input id="editTime" type="time"></label>
         </div>
         <div id="editLegacyCatWrap" class="legacy-cat-field" hidden><span>기존 기록 종류</span><strong id="editLegacyCat"></strong></div>
-        <label><span>업무명</span><textarea id="editContent" rows="3" maxlength="160"></textarea></label>
+        <label><span>업무명</span><textarea id="editContent" rows="3" maxlength="500"></textarea></label>
         <label><span>발생 경로</span><select id="editOrigin"><option value="">기본</option><option value="request">요청받음</option><option value="self">내가 먼저 함</option></select></label>
         <div id="editRequestFields">
-          <label><span>요청자</span><input id="editRequester" type="text" maxlength="40"></label>
+          <label><span>요청자</span><input id="editRequester" type="text" maxlength="80"></label>
           <label><span>요청받은 시각</span><input id="editRequestedAt" type="datetime-local"></label>
           <label><span>원래 예정일</span><input id="editDueDate" type="date"></label>
         </div>
         <button id="editReturnPendingBtn" class="secondary-btn full" type="button" hidden>해야 할 요청으로 되돌리기</button>
-        <label><span>프로젝트</span><input id="editProject" type="text" maxlength="60"></label>
-        <label><span>메모</span><textarea id="editMemo" rows="2" maxlength="180"></textarea></label>
+        <label><span>프로젝트</span><input id="editProject" type="text" maxlength="120"></label>
+        <label><span>메모</span><textarea id="editMemo" rows="2" maxlength="500"></textarea></label>
         <label class="check-line"><input id="editSolved" type="checkbox"><span>문제해결</span></label>
         <label class="check-line"><input id="editHighlight" type="checkbox"><span>평가 때 기억할 대표 업무</span></label>
       </div>

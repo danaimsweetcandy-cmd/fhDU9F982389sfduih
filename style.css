@@ -98,3 +98,14 @@ input::placeholder,textarea::placeholder{color:var(--ink-faint);opacity:1}
 .request-line input,.extra-grid input,.when-row input[type="date"],.content-input,.search-box input,.settings-wrap textarea,.settings-wrap input,.modal-body textarea,.modal-body input,.modal-body select,.edit-two input,.field textarea,.field input{border-color:var(--control-line)}
 .origin-chip,.when-chip{min-height:36px}
 @media(max-width:359px){.day-header,.quick-add,.view-header{padding-left:14px;padding-right:14px}.timeline,.pending-list,.summary-wrap,.hist-list,.settings-wrap,.search-box{padding-left:14px;padding-right:14px}.day-nav{padding-right:48px}}
+
+/* v8.3 출시 안정화 */
+.sync-dot.syncing{background:var(--self)}
+.sync-dot.offline{background:var(--ink-faint)}
+.recording-date-hint{display:block;margin:8px 0 0;padding:6px 9px;border-radius:9px;background:#FFF3D9;color:#795B18;font-size:11.5px;font-weight:700;text-align:left}
+.recording-date-hint::after{content:" · 누르면 오늘로 이동";font-weight:500}
+.settings-actions{flex-wrap:wrap}
+.data-actions .secondary-btn{flex:1 1 120px}
+.token-row{display:flex;gap:7px;align-items:center}.token-row input{flex:1;min-width:0}.token-row .text-btn{flex:none;min-width:48px}
+#syncDetailText{line-height:1.5}
+@media(max-width:359px){.settings-actions .primary-btn,.settings-actions .secondary-btn{flex:1 1 100%}}
