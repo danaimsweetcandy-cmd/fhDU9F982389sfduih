@@ -1,5 +1,5 @@
 // ============================================================
-// 업무일지 PWA v8
+// 업무일지 PWA v8.2
 // 기존 localStorage / Google Sheets 데이터와 하위 호환 유지
 // ============================================================
 const CONFIG = { GAS_URL: "PUT_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE" };
@@ -11,7 +11,6 @@ const LS_GAS_URL = "worklog_gas_url";
 const LS_GAS_TOKEN = "worklog_gas_token";
 const MAX_GAS_URL_LENGTH = 7500;
 
-const CATS = ["업무", "수정", "검수", "진행관리", "회의", "해결", "기타", "요청"];
 const CAT_LABEL = {
   "업무": "업무", "수정": "수정", "검수": "검수", "진행관리": "진행관리",
   "회의": "회의", "해결": "해결한 문제", "기타": "기타", "요청": "요청받은 일"
@@ -22,7 +21,6 @@ const state = {
   logs: [],
   reflections: {},
   currentDate: todayStr(),
-  activeCat: "업무",
   activeOrigin: "",
   requestWhen: "now",
   summaryYear: new Date().getFullYear(),
@@ -136,8 +134,12 @@ function isGasUrlSet() { const u = getGasUrl(); return !!u && !u.startsWith("PUT
 
 function normalizeLog(raw) {
   raw = raw || {};
-  const cat = CATS.includes(raw.cat) ? raw.cat : (raw.cat || "업무");
+  const cat = String(raw.cat || "업무");
   const date = normalizeDateStr(raw.date) || todayStr();
+  const hasSolved = raw.solved !== undefined && raw.solved !== null && raw.solved !== "";
+  const solved = hasSolved
+    ? (raw.solved === true || raw.solved === "true" || raw.solved === "Y")
+    : cat === "해결";
   return {
     ...raw,
     id: raw.id || uid(),
@@ -153,6 +155,7 @@ function normalizeLog(raw) {
     dueDate: normalizeDateStr(raw.dueDate),
     project: String(raw.project || ""),
     memo: String(raw.memo || ""),
+    solved,
     highlight: raw.highlight === true || raw.highlight === "true" || raw.highlight === "Y",
     status: raw.status === "pending" ? "pending" : "logged",
     actualStartedAt: normalizeDateTimeLocal(raw.actualStartedAt)
@@ -357,7 +360,7 @@ function logPayload(item) {
   return {
     id:x.id,date:x.date,time:x.time,cat:x.cat,content:x.content,updatedAt:x.updatedAt,deleted:!!x.deleted,
     origin:x.origin,requester:x.requester,requestedAt:x.requestedAt,dueDate:x.dueDate,project:x.project,memo:x.memo,
-    highlight:!!x.highlight,status:x.status,actualStartedAt:x.actualStartedAt
+    solved:!!x.solved,highlight:!!x.highlight,status:x.status,actualStartedAt:x.actualStartedAt
   };
 }
 
@@ -375,6 +378,7 @@ function resetQuickMeta() {
   $("requestFields").hidden = true;
   $("requestDueDate").hidden = true;
   $("requesterInput").value = "";
+  $("quickSolved").checked = false;
   $("quickProject").value = "";
   $("quickMemo").value = "";
   const d = document.querySelector(".extra-details"); if (d) d.open = false;
@@ -389,8 +393,8 @@ function addQuickLog() {
   const item = normalizeLog({
     id: uid(),
     date: pending ? dueDate : state.currentDate,
-    time: pending ? nowTimeStr(now) : nowTimeStr(now),
-    cat: state.activeCat,
+    time: nowTimeStr(now),
+    cat: "업무",
     content,
     origin: state.activeOrigin,
     requester: state.activeOrigin === "request" ? $("requesterInput").value.trim() : "",
@@ -398,6 +402,7 @@ function addQuickLog() {
     dueDate,
     project: $("quickProject").value.trim(),
     memo: $("quickMemo").value.trim(),
+    solved: $("quickSolved").checked,
     highlight: false,
     status: pending ? "pending" : "logged",
     actualStartedAt: pending ? "" : `${pending ? dueDate : state.currentDate}T${nowTimeStr(now)}`,
@@ -509,6 +514,7 @@ function requesterOptions() {
 }
 function logMetaHtml(item) {
   const tags = [];
+  if (item.solved) tags.push(`<span class="mini-tag solved">문제해결</span>`);
   if (item.origin === "request") {
     tags.push(`<span class="mini-tag request">요청받음${item.requester ? " · " + escapeHtml(item.requester) : ""}</span>`);
     if (item.requestedAt) tags.push(`<span class="mini-tag">${escapeHtml(formatDateTime(item.requestedAt))} 요청</span>`);
@@ -520,9 +526,12 @@ function logMetaHtml(item) {
   return tags.join("");
 }
 function logRowHtml(item) {
-  return `<div class="log-item" data-cat="${escapeHtml(item.cat)}" data-id="${escapeHtml(item.id)}">
+  const legacyLabel = item.cat && item.cat !== "업무" && !(item.cat === "해결" && item.solved)
+    ? `<strong>${escapeHtml(CAT_LABEL[item.cat] || item.cat)}</strong> `
+    : "";
+  return `<div class="log-item" data-cat="${escapeHtml(item.cat)}" data-solved="${item.solved ? "true" : "false"}" data-id="${escapeHtml(item.id)}">
     <div class="log-time">${escapeHtml(item.time)}</div><div class="log-bar"></div>
-    <div class="log-main"><div class="log-title"><strong>${escapeHtml(CAT_LABEL[item.cat] || item.cat)}</strong> ${escapeHtml(item.content)}</div>
+    <div class="log-main"><div class="log-title">${legacyLabel}${escapeHtml(item.content)}</div>
       ${logMetaHtml(item) ? `<div class="log-tags">${logMetaHtml(item)}</div>` : ""}
       ${item.memo ? `<div class="log-note">${escapeHtml(item.memo)}</div>` : ""}
     </div>
@@ -548,7 +557,7 @@ function renderToday() {
     const when = due === todayStr() ? "오늘" : due === addDays(todayStr(),1) ? "내일" : formatShortDate(due);
     return `<article class="pending-card" data-id="${escapeHtml(x.id)}">
       <div class="pending-main"><div class="pending-title">${escapeHtml(x.content)}</div>
-      <div class="pending-meta">${x.requester ? escapeHtml(x.requester) + " · " : ""}${x.requestedAt ? formatDateTime(x.requestedAt) + " 요청 · " : ""}<span class="pending-due${overdue ? " overdue" : ""}">${overdue ? "기한 지남 · " : ""}${escapeHtml(when)}</span>${x.project ? " · " + escapeHtml(x.project) : ""}</div></div>
+      <div class="pending-meta">${x.requester ? escapeHtml(x.requester) + " · " : ""}${x.requestedAt ? formatDateTime(x.requestedAt) + " 요청 · " : ""}<span class="pending-due${overdue ? " overdue" : ""}">${overdue ? "기한 지남 · " : ""}${escapeHtml(when)}</span>${x.solved ? " · 문제해결" : ""}${x.project ? " · " + escapeHtml(x.project) : ""}</div></div>
       <button class="start-btn" data-start="${escapeHtml(x.id)}">시작</button>
       <div class="pending-actions"><button class="text-btn" data-tomorrow="${escapeHtml(x.id)}">+1일</button><button class="text-btn" data-edit="${escapeHtml(x.id)}">수정</button></div>
     </article>`;
@@ -576,14 +585,20 @@ function renderSummary() {
   const highlights = rows.filter(x => x.highlight);
   const self = rows.filter(x => x.origin === "self");
   const requestsProcessed = rows.filter(x => x.origin === "request" || x.cat === "요청");
-  const solved = rows.filter(x => x.cat === "해결");
-  const correctionReview = rows.filter(x => x.cat === "수정" || x.cat === "검수");
+  const solved = rows.filter(x => x.solved);
   const projects = {};
   rows.forEach(x => { if (x.project) projects[x.project] = (projects[x.project] || 0) + 1; });
   const projectEntries = Object.entries(projects).sort((a,b) => b[1]-a[1]);
   const refl = Object.values(state.reflections).filter(r => r.date.startsWith(key)).sort((a,b) => b.date.localeCompare(a.date));
 
-  const list = arr => arr.length ? `<div class="summary-list">${arr.map(x => `<div class="summary-item"><div class="title">${escapeHtml(x.content)}</div><div class="meta">${formatShortDate(x.date)} · ${escapeHtml(CAT_LABEL[x.cat] || x.cat)}${x.requester ? " · " + escapeHtml(x.requester) : ""}${x.project ? " · " + escapeHtml(x.project) : ""}</div></div>`).join("")}</div>` : `<div class="summary-empty">기록 없음</div>`;
+  const list = arr => arr.length ? `<div class="summary-list">${arr.map(x => {
+    const meta = [formatShortDate(x.date)];
+    if (x.cat && x.cat !== "업무" && !(x.cat === "해결" && x.solved)) meta.push(CAT_LABEL[x.cat] || x.cat);
+    if (x.solved) meta.push("문제해결");
+    if (x.requester) meta.push(x.requester);
+    if (x.project) meta.push(x.project);
+    return `<div class="summary-item"><div class="title">${escapeHtml(x.content)}</div><div class="meta">${meta.map(escapeHtml).join(" · ")}</div></div>`;
+  }).join("")}</div>` : `<div class="summary-empty">기록 없음</div>`;
   const reflEntries = refl.filter(r => r.achievement || r.difficulty).slice(0,12);
 
   $("monthSummary").innerHTML = `
@@ -593,7 +608,6 @@ function renderSummary() {
       <div class="metric"><strong>${requestsReceived.length}</strong><span>요청받음</span></div>
       <div class="metric"><strong>${requestsProcessed.length}</strong><span>요청 처리</span></div>
       <div class="metric"><strong>${self.length}</strong><span>내가 먼저 함</span></div>
-      <div class="metric"><strong>${correctionReview.length}</strong><span>수정·검수</span></div>
       <div class="metric"><strong>${pendingCreated.length}</strong><span>요청 중 대기</span></div>
     </div></section>
     <section class="summary-card"><h2>내가 먼저 챙긴 일</h2>${list(self)}</section>
@@ -614,7 +628,7 @@ function renderHistory(filter = $("searchInput").value || "") {
     if (!q) return true;
     const items = logsForDate(date);
     const r = getReflection(date);
-    return [...items.map(x => [x.content,x.requester,x.project,x.memo,CAT_LABEL[x.cat]||x.cat].join(" ")), r.summary,r.difficulty,r.achievement,r.tomorrow].join(" ").toLowerCase().includes(q);
+    return [...items.map(x => [x.content,x.requester,x.project,x.memo,CAT_LABEL[x.cat]||x.cat,x.solved ? "문제해결 해결한 문제" : ""].join(" ")), r.summary,r.difficulty,r.achievement,r.tomorrow].join(" ").toLowerCase().includes(q);
   });
   if (!dates.length) { $("histList").innerHTML = `<div class="hist-empty">검색되는 기록이 없어.</div>`; return; }
   $("histList").innerHTML = dates.map(date => {
@@ -658,9 +672,9 @@ function openEdit(id) {
   modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   $("editDate").value = item.date;
   $("editTime").value = item.time;
-  const editCats = item.cat === "요청" ? CATS : CATS.filter(c => c !== "요청");
-  $("editCat").innerHTML = editCats.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(CAT_LABEL[c] || c)}</option>`).join("");
-  $("editCat").value = item.cat;
+  const legacyCat = item.cat && item.cat !== "업무" ? (CAT_LABEL[item.cat] || item.cat) : "";
+  $("editLegacyCatWrap").hidden = !legacyCat;
+  $("editLegacyCat").textContent = legacyCat;
   $("editContent").value = item.content;
   $("editOrigin").value = item.origin;
   $("editRequester").value = item.requester;
@@ -668,6 +682,7 @@ function openEdit(id) {
   $("editDueDate").value = item.dueDate;
   $("editProject").value = item.project;
   $("editMemo").value = item.memo;
+  $("editSolved").checked = !!item.solved;
   $("editHighlight").checked = !!item.highlight;
   $("editRequestFields").hidden = item.origin !== "request";
   $("editReturnPendingBtn").hidden = !(item.origin === "request" && item.status !== "pending");
@@ -693,13 +708,13 @@ function saveEdit() {
   const time = $("editTime").value;
   const fields = {
     date, time,
-    cat: $("editCat").value,
     content, origin,
     requester: origin === "request" ? $("editRequester").value.trim() : "",
     requestedAt: origin === "request" ? $("editRequestedAt").value : "",
     dueDate: origin === "request" ? $("editDueDate").value : "",
     project: $("editProject").value.trim(),
     memo: $("editMemo").value.trim(),
+    solved: $("editSolved").checked,
     highlight: $("editHighlight").checked,
     actualStartedAt: item.status === "pending" ? "" : `${date}T${time}`
   };
@@ -716,10 +731,6 @@ function downloadBackup() {
 }
 
 function bindEvents() {
-  document.querySelectorAll(".chip").forEach(b => b.addEventListener("click", () => {
-    state.activeCat = b.dataset.cat;
-    document.querySelectorAll(".chip").forEach(x => { const on = x === b; x.classList.toggle("active", on); x.setAttribute("aria-pressed", String(on)); });
-  }));
   document.querySelectorAll(".origin-chip").forEach(b => b.addEventListener("click", () => {
     state.activeOrigin = b.dataset.origin;
     document.querySelectorAll(".origin-chip").forEach(x => { const on = x === b; x.classList.toggle("active", on); x.setAttribute("aria-pressed", String(on)); });
@@ -806,7 +817,7 @@ function bindEvents() {
 
 function init() {
   loadLocal();
-  document.querySelectorAll(".chip,.origin-chip,.when-chip").forEach(b => b.setAttribute("aria-pressed", String(b.classList.contains("active"))));
+  document.querySelectorAll(".origin-chip,.when-chip").forEach(b => b.setAttribute("aria-pressed", String(b.classList.contains("active"))));
   bindEvents();
   renderToday();
   setSyncDot(isGasUrlSet() ? (getOutbox().length ? "pending" : "ok") : "");

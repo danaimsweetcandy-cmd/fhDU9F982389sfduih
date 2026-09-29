@@ -34,16 +34,6 @@
       </header>
 
       <section class="quick-add" aria-label="빠른 기록">
-        <div class="chip-row" id="catChips" role="group" aria-label="업무 종류">
-          <button class="chip active" data-cat="업무" type="button">업무</button>
-          <button class="chip" data-cat="수정" type="button">수정</button>
-          <button class="chip" data-cat="검수" type="button">검수</button>
-          <button class="chip" data-cat="진행관리" type="button">진행관리</button>
-          <button class="chip" data-cat="회의" type="button">회의</button>
-          <button class="chip" data-cat="해결" type="button">문제해결</button>
-          <button class="chip" data-cat="기타" type="button">기타</button>
-        </div>
-
         <div class="add-row">
           <input id="quickContent" class="content-input" type="text" maxlength="160" autocomplete="off" enterkeyhint="done" placeholder="무슨 일을 했어?" aria-label="업무명">
           <button id="quickAddBtn" class="add-btn" type="button">저장</button>
@@ -54,6 +44,8 @@
           <button class="origin-chip" data-origin="request" type="button">요청받음</button>
           <button class="origin-chip" data-origin="self" type="button">내가 먼저 함</button>
         </div>
+
+        <label class="quick-solved"><input id="quickSolved" type="checkbox"><span>문제해결</span></label>
 
         <div id="requestFields" class="request-fields" hidden>
           <div class="request-line">
@@ -203,7 +195,7 @@
           <label><span>날짜</span><input id="editDate" type="date"></label>
           <label><span>시작 시각</span><input id="editTime" type="time"></label>
         </div>
-        <label><span>종류</span><select id="editCat"></select></label>
+        <div id="editLegacyCatWrap" class="legacy-cat-field" hidden><span>기존 기록 종류</span><strong id="editLegacyCat"></strong></div>
         <label><span>업무명</span><textarea id="editContent" rows="3" maxlength="160"></textarea></label>
         <label><span>발생 경로</span><select id="editOrigin"><option value="">기본</option><option value="request">요청받음</option><option value="self">내가 먼저 함</option></select></label>
         <div id="editRequestFields">
@@ -214,6 +206,7 @@
         <button id="editReturnPendingBtn" class="secondary-btn full" type="button" hidden>해야 할 요청으로 되돌리기</button>
         <label><span>프로젝트</span><input id="editProject" type="text" maxlength="60"></label>
         <label><span>메모</span><textarea id="editMemo" rows="2" maxlength="180"></textarea></label>
+        <label class="check-line"><input id="editSolved" type="checkbox"><span>문제해결</span></label>
         <label class="check-line"><input id="editHighlight" type="checkbox"><span>평가 때 기억할 대표 업무</span></label>
       </div>
       <div class="modal-actions">

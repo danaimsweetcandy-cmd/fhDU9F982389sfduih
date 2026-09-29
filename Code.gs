@@ -1,5 +1,5 @@
 // ============================================================
-// 업무일지 PWA v8.1.1 백엔드
+// 업무일지 PWA v8.2 백엔드
 //
 // 기존 한글 탭(로그 / 회고)과 영문 탭(Log / Reflection)을 함께 읽는다.
 // 과거 행을 옮기거나 삭제하지 않으며, 동일 id/날짜는 최신 수정시각을 사용한다.
@@ -17,7 +17,7 @@ const LEGACY_REFL_SHEET = "회고";
 const LOG_HEADERS = [
   "id", "date", "time", "cat", "content", "updatedAt", "deleted",
   "origin", "requester", "requestedAt", "dueDate", "project", "memo",
-  "highlight", "status", "actualStartedAt"
+  "highlight", "status", "actualStartedAt", "solved"
 ];
 const REFL_HEADERS = ["date", "summary", "difficulty", "achievement", "tomorrow", "updatedAt"];
 
@@ -110,7 +110,7 @@ function normalizeCell_(header, value, displayValue) {
   if (header === "date" || header === "dueDate") return dateKey_(value);
   if (header === "time") return timeKey_(value, displayValue);
   if (header === "updatedAt") return value instanceof Date ? value.getTime() : (Number(value) || 0);
-  if (header === "deleted" || header === "highlight") return bool_(value);
+  if (header === "deleted" || header === "highlight" || header === "solved") return bool_(value);
   return value == null ? "" : value;
 }
 
@@ -208,7 +208,7 @@ function cleanLog_(payload) {
     requester: String(p.requester || ""), requestedAt: String(p.requestedAt || ""),
     dueDate: dateKey_(p.dueDate), project: String(p.project || ""), memo: String(p.memo || ""),
     highlight: bool_(p.highlight), status: p.status === "pending" ? "pending" : "logged",
-    actualStartedAt: String(p.actualStartedAt || "")
+    actualStartedAt: String(p.actualStartedAt || ""), solved: bool_(p.solved)
   };
 }
 
