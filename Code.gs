@@ -1,5 +1,5 @@
 // ============================================================
-// 업무일지 PWA v8.4 백엔드
+// 업무일지 PWA v8.5 백엔드
 // - 기존 Log / 로그, Reflection / 회고 데이터 하위 호환
 // - 모든 쓰기는 GET + query string
 // - 수정시각 + deviceId 버전 비교, tombstone, revision 증분 동기화
@@ -19,7 +19,8 @@ const REVISION_KEY = "worklog_revision";
 const LOG_HEADERS = [
   "id", "date", "time", "cat", "content", "updatedAt", "deleted",
   "origin", "requester", "requestedAt", "dueDate", "project", "memo",
-  "highlight", "status", "actualStartedAt", "solved", "deviceId", "rev", "meeting", "support"
+  "highlight", "status", "actualStartedAt", "solved", "deviceId", "rev", "meeting", "support",
+  "requestId", "requestState", "completedAt"
 ];
 const REFL_HEADERS = [
   "date", "summary", "difficulty", "achievement", "tomorrow", "updatedAt",
@@ -278,7 +279,7 @@ function writeObjectRow_(sheet, rowNumber, wantedHeaders, aliases, item) {
     sheet.appendRow(existing);
     rowNumber = sheet.getLastRow();
   }
-  ["date", "time", "requestedAt", "dueDate", "actualStartedAt", "deviceId"].forEach(header => {
+  ["date", "time", "requestedAt", "dueDate", "actualStartedAt", "completedAt", "deviceId"].forEach(header => {
     const index = headerIndex_(hm.map, header, aliases);
     if (index !== undefined && item[header] !== undefined) {
       sheet.getRange(rowNumber, index + 1).setNumberFormat("@").setValue(item[header]);
@@ -334,6 +335,15 @@ function cleanLogPayload_(payload, requireCore) {
   if (Object.prototype.hasOwnProperty.call(p, "solved")) out.solved = payloadTriBool_(p.solved, "문제해결");
   if (Object.prototype.hasOwnProperty.call(p, "meeting")) out.meeting = payloadTriBool_(p.meeting, "회의");
   if (Object.prototype.hasOwnProperty.call(p, "support")) out.support = payloadTriBool_(p.support, "협업·지원");
+  if (Object.prototype.hasOwnProperty.call(p, "requestId")) out.requestId = text_(p.requestId, 200, "요청ID", true).trim();
+  if (Object.prototype.hasOwnProperty.call(p, "requestState")) {
+    const requestState = String(p.requestState || "");
+    if (!["", "waiting", "in_progress", "done"].includes(requestState)) throw new Error("요청 상태가 올바르지 않아");
+    out.requestState = requestState;
+  }
+  if (Object.prototype.hasOwnProperty.call(p, "completedAt")) {
+    const v = validDateTime_(p.completedAt, true); if (v === null) throw new Error("완료 시각이 올바르지 않아"); out.completedAt = v;
+  }
   if (Object.prototype.hasOwnProperty.call(p, "deviceId")) out.deviceId = text_(p.deviceId, 100, "deviceId", true);
   return out;
 }
@@ -359,6 +369,9 @@ function defaultLog_(cleaned) {
     solved: cleaned.solved === undefined ? "" : cleaned.solved,
     meeting: cleaned.meeting === undefined ? "" : cleaned.meeting,
     support: cleaned.support === undefined ? "" : cleaned.support,
+    requestId: cleaned.requestId || "",
+    requestState: cleaned.requestState || "",
+    completedAt: cleaned.completedAt || "",
     deviceId: cleaned.deviceId || "",
     rev: 0
   };
@@ -485,7 +498,7 @@ function responseBase_() {
   return {
     appId: APP_ID,
     schemaVersion: SCHEMA_VERSION,
-    capabilities: ["contextFlagsV1"],
+    capabilities: ["contextFlagsV1", "requestWorkflowV1"],
     storeId: storeId_(),
     serverTime: Date.now(),
     revision: currentRevision_()

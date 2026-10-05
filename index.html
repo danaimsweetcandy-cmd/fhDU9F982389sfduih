@@ -65,7 +65,7 @@
             <button class="when-chip" data-when="date" type="button">날짜</button>
             <input id="requestDueDate" type="date" aria-label="요청 예정일" hidden>
           </div>
-          <p class="microcopy">요청받은 시각은 저장하는 순간 자동으로 남아.</p>
+          <p class="microcopy">요청받은 시각은 자동으로 남고, 시작한 뒤에는 날짜별 작업 기록을 이어서 남길 수 있어.</p>
         </div>
 
         <details class="extra-details">
@@ -79,7 +79,7 @@
 
       <section id="pendingSection" class="pending-section" hidden>
         <div class="section-title-row">
-          <h2>해야 할 요청</h2>
+          <h2>요청 업무</h2>
           <span id="pendingCount" class="count-badge"></span>
         </div>
         <div id="pendingList" class="pending-list"></div>
@@ -204,7 +204,7 @@
         <button type="button" class="modal-close" data-close-modal aria-label="닫기">×</button>
       </div>
       <div class="modal-body">
-        <div class="edit-two">
+        <div id="editDateTimeWrap" class="edit-two">
           <label><span>날짜</span><input id="editDate" type="date"></label>
           <label><span>시작 시각</span><input id="editTime" type="time"></label>
         </div>

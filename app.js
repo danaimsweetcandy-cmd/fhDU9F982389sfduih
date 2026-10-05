@@ -1,12 +1,12 @@
 // ============================================================
-// 업무일지 PWA v8.4
-// 기록은 가볍게, 데이터는 보수적으로 보존하는 출시 후보
+// 업무일지 PWA v8.5
+// 기록은 가볍게, 여러 날 이어지는 요청도 날짜별로 남기는 출시 후보
 // ============================================================
 const CONFIG = { GAS_URL: "PUT_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE" };
-const APP_VERSION = "8.4.0";
+const APP_VERSION = "8.5.0";
 const APP_ID = "dayeon-worklog";
 const API_SCHEMA_VERSION = 3;
-const REQUIRED_SERVER_CAPABILITY = "contextFlagsV1";
+const REQUIRED_SERVER_CAPABILITIES = ["contextFlagsV1","requestWorkflowV1"];
 
 const LS_LOGS = "worklog_logs";
 const LS_REFL = "worklog_reflections";
@@ -177,6 +177,10 @@ function normalizeLog(raw) {
   const hasSupport=raw.support!==undefined&&raw.support!==null&&raw.support!=="";
   const origin=raw.origin==="request"||raw.origin==="self"?raw.origin:"";
   let status=raw.status==="pending"?"pending":"logged"; if(status==="pending"&&origin!=="request")status="logged";
+  const requestId=String(raw.requestId||"").trim();
+  let requestState=["waiting","in_progress","done"].includes(String(raw.requestState||""))?String(raw.requestState):"";
+  if(origin==="request"&&!requestId&&!requestState&&status==="pending")requestState="waiting";
+  if(requestState&&origin==="request"&&!requestId)status="pending";
   const updated=Number(raw.updatedAt);
   return {...raw,id,date,time:normalizeTimeStr(raw.time)||"00:00",cat,content:String(raw.content||""),
     updatedAt:Number.isFinite(updated)&&updated>=0?updated:0,deleted:boolValue(raw.deleted),origin,requester:String(raw.requester||""),
@@ -185,7 +189,8 @@ function normalizeLog(raw) {
     meeting:hasMeeting?boolValue(raw.meeting):cat==="회의",
     support:hasSupport?boolValue(raw.support):false,
     highlight:boolValue(raw.highlight),status,
-    actualStartedAt:normalizeDateTimeLocal(raw.actualStartedAt),deviceId:String(raw.deviceId||""),rev:Number(raw.rev)||0};
+    actualStartedAt:normalizeDateTimeLocal(raw.actualStartedAt),requestId,requestState,completedAt:normalizeDateTimeLocal(raw.completedAt),
+    deviceId:String(raw.deviceId||""),rev:Number(raw.rev)||0};
 }
 function normalizeReflection(raw,key) {
   if(!raw||typeof raw!=="object")return null; const date=normalizeDateStr(raw.date||key); if(!date)return null; const updated=Number(raw.updatedAt);
@@ -224,10 +229,14 @@ function enqueueInBox(source,action,payload) {
   box.push({action,payload,queuedAt:Date.now(),qid:qid()}); return box;
 }
 function notifySharedChange() { try{sharedChannel&&sharedChannel.postMessage({type:"data-changed",from:TAB_ID});}catch{} }
-function persistLogAndQueue(nextLogs,action,payload) {
-  const nextBox=enqueueInBox(getOutbox(),action,payload);
+function persistLogsAndQueueActions(nextLogs,actions) {
+  let nextBox=getOutbox();
+  for(const a of actions||[])nextBox=enqueueInBox(nextBox,a.action,a.payload);
   if(!commitStorageChanges({[LS_LOGS]:JSON.stringify(nextLogs),[LS_OUTBOX]:JSON.stringify(nextBox)}))return false;
-  state.logs=nextLogs; scheduleSync(); notifySharedChange(); return true;
+  state.logs=nextLogs;scheduleSync();notifySharedChange();return true;
+}
+function persistLogAndQueue(nextLogs,action,payload) {
+  return persistLogsAndQueueActions(nextLogs,[{action,payload}]);
 }
 function persistReflectionAndQueue(nextRefl,payload) {
   const nextBox=enqueueInBox(getOutbox(),"UPSERT_REFLECTION",payload);
@@ -261,7 +270,7 @@ function validateEnvelope(data,expectedStoreId) {
   if(!data||typeof data!=="object")throw new SyncError("서버 응답 형식이 올바르지 않아","BAD_RESPONSE");
   if(data.appId!==APP_ID)throw new SyncError("업무일지용 Apps Script가 아니야","WRONG_APP");
   if(Number(data.schemaVersion)!==API_SCHEMA_VERSION)throw new SyncError("앱과 Apps Script 버전이 맞지 않아","SCHEMA_MISMATCH");
-  if(!Array.isArray(data.capabilities)||!data.capabilities.includes(REQUIRED_SERVER_CAPABILITY))throw new SyncError("Apps Script를 v8.4 버전으로 먼저 업데이트해줘","SERVER_UPDATE_REQUIRED");
+  if(!Array.isArray(data.capabilities)||REQUIRED_SERVER_CAPABILITIES.some(x=>!data.capabilities.includes(x)))throw new SyncError("Apps Script를 v8.5 버전으로 먼저 업데이트해줘","SERVER_UPDATE_REQUIRED");
   if(!data.storeId)throw new SyncError("시트 식별값이 없어","BAD_RESPONSE");
   if(expectedStoreId&&data.storeId!==expectedStoreId)throw new SyncError("현재 연결된 시트와 다른 시트야","WRONG_STORE");
   const serverTime=Number(data.serverTime); if(Number.isFinite(serverTime))state.clockSkewMs=Date.now()-serverTime;
@@ -361,7 +370,8 @@ function logPayload(item) {
   const x=normalizeLog(item); if(!x)throw new Error("잘못된 기록이야");
   return {id:x.id,date:x.date,time:x.time,cat:x.cat,content:x.content,updatedAt:x.updatedAt,deleted:!!x.deleted,origin:x.origin,requester:x.requester,
     requestedAt:x.requestedAt,dueDate:x.dueDate,project:x.project,memo:x.memo,solved:!!x.solved,meeting:!!x.meeting,support:!!x.support,
-    highlight:!!x.highlight,status:x.status,actualStartedAt:x.actualStartedAt,deviceId:x.deviceId||DEVICE_ID};
+    highlight:!!x.highlight,status:x.status,actualStartedAt:x.actualStartedAt,requestId:x.requestId,requestState:x.requestState,completedAt:x.completedAt,
+    deviceId:x.deviceId||DEVICE_ID};
 }
 function reflectionPayload(r) { const x=normalizeReflection(r,r&&r.date); if(!x)throw new Error("잘못된 회고야"); return {...x,deviceId:x.deviceId||DEVICE_ID}; }
 
@@ -386,36 +396,82 @@ function resetQuickMeta() {
   $("quickMemo").value = "";
   const d = document.querySelector(".extra-details"); if (d) d.open = false;
 }
+function requestWorkId(rootId,date) {
+  const raw=String(rootId||"");let h=2166136261;for(let i=0;i<raw.length;i++){h^=raw.charCodeAt(i);h=Math.imul(h,16777619)>>>0;}
+  return `reqwork-${date}-${raw.slice(0,120)}-${h.toString(36)}`.slice(0,200);
+}
+function makeRequestWorkLog(root,date=todayStr(),now=new Date(),memo="") {
+  return normalizeLog({id:requestWorkId(root.id,date),date,time:nowTimeStr(now),cat:"업무",content:root.content,origin:"request",requester:root.requester,
+    requestedAt:root.requestedAt,dueDate:root.dueDate,project:root.project,memo,meeting:root.meeting,solved:root.solved,support:root.support,
+    highlight:false,status:"logged",actualStartedAt:`${date}T${nowTimeStr(now)}`,requestId:root.id,requestState:"",completedAt:"",
+    updatedAt:mutationTimestamp(),deleted:false,deviceId:DEVICE_ID});
+}
+function requestWorkLogs(rootId) {
+  return state.logs.filter(x=>!x.deleted&&x.status!=="pending"&&x.requestId===rootId);
+}
+function requestWorkLogOnDate(rootId,date) {
+  return state.logs.find(x=>!x.deleted&&x.status!=="pending"&&x.requestId===rootId&&x.date===date)||null;
+}
+function requestRoots(includeDone=false) {
+  return state.logs.filter(x=>!x.deleted&&x.origin==="request"&&!x.requestId&&x.requestState&&(includeDone||x.requestState!=="done"));
+}
 function addQuickLog() {
   const content=$("quickContent").value.trim(); if(!content){toast("업무명을 입력해줘");return;}
   const now=new Date(), requestedAt=state.activeOrigin==="request"?nowLocalDateTime(now):"", dueDate=state.activeOrigin==="request"?requestDueDate():"";
-  const pending=state.activeOrigin==="request"&&state.requestWhen!=="now";
-  const item=normalizeLog({id:uid(),date:pending?dueDate:state.currentDate,time:nowTimeStr(now),cat:"업무",content,origin:state.activeOrigin,
-    requester:state.activeOrigin==="request"?$("requesterInput").value.trim():"",requestedAt,dueDate,project:$("quickProject").value.trim(),memo:$("quickMemo").value.trim(),
-    meeting:$("quickMeeting").checked,solved:$("quickSolved").checked,support:$("quickSupport").checked,
-    highlight:false,status:pending?"pending":"logged",actualStartedAt:pending?"":`${state.currentDate}T${nowTimeStr(now)}`,
-    updatedAt:mutationTimestamp(),deleted:false,deviceId:DEVICE_ID});
+  if(state.activeOrigin==="request"){
+    const startNow=state.requestWhen==="now";
+    const root=normalizeLog({id:uid(),date:dueDate||state.currentDate,time:nowTimeStr(now),cat:"업무",content,origin:"request",
+      requester:$("requesterInput").value.trim(),requestedAt,dueDate,project:$("quickProject").value.trim(),memo:$("quickMemo").value.trim(),
+      meeting:$("quickMeeting").checked,solved:$("quickSolved").checked,support:$("quickSupport").checked,
+      highlight:false,status:"pending",actualStartedAt:startNow?nowLocalDateTime(now):"",requestId:"",
+      requestState:startNow?"in_progress":"waiting",completedAt:"",updatedAt:mutationTimestamp(),deleted:false,deviceId:DEVICE_ID});
+    if(!root){toast("요청 값을 읽지 못했어");return;}
+    const next=[...state.logs,root],actions=[{action:"ADD_LOG",payload:logPayload(root)}];
+    if(startNow){
+      const work=makeRequestWorkLog(root,state.currentDate,now,$("quickMemo").value.trim()); if(!work){toast("작업 기록을 만들지 못했어");return;}
+      next.push(work);actions.push({action:"ADD_LOG",payload:logPayload(work)});
+    }
+    if(!persistLogsAndQueueActions(next,actions))return;
+    $("quickContent").value="";resetQuickMeta();renderToday();toast(startNow?"진행 중 요청과 오늘 작업을 기록했어":"요청을 대기로 남겼어");return;
+  }
+  const item=normalizeLog({id:uid(),date:state.currentDate,time:nowTimeStr(now),cat:"업무",content,origin:state.activeOrigin,
+    requester:"",requestedAt:"",dueDate:"",project:$("quickProject").value.trim(),memo:$("quickMemo").value.trim(),meeting:$("quickMeeting").checked,
+    solved:$("quickSolved").checked,support:$("quickSupport").checked,highlight:false,status:"logged",actualStartedAt:`${state.currentDate}T${nowTimeStr(now)}`,
+    requestId:"",requestState:"",completedAt:"",updatedAt:mutationTimestamp(),deleted:false,deviceId:DEVICE_ID});
   if(!item){toast("기록 값이 올바르지 않아");return;}
   const next=[...state.logs,item]; if(!persistLogAndQueue(next,"ADD_LOG",logPayload(item)))return;
-  $("quickContent").value="";resetQuickMeta();renderToday();toast(pending?"요청을 할 일로 남겼어":"기록했어");
+  $("quickContent").value="";resetQuickMeta();renderToday();toast("기록했어");
 }
 function startPending(id) {
-  const item = state.logs.find(x => x.id === id);
-  if (!item || item.status !== "pending") return;
-  const now = new Date();
-  const date = todayStr(now), time = nowTimeStr(now);
-  if (!updateLog(id, { status:"logged", date, time, actualStartedAt:nowLocalDateTime(now) })) return;
-  state.currentDate = date;
-  state.followToday = true;
-  renderToday();
-  toast("시작한 업무로 기록했어");
+  const root=state.logs.find(x=>x.id===id&&!x.deleted); if(!root||root.requestState!=="waiting")return;
+  const now=new Date(),date=todayStr(now); if(requestWorkLogOnDate(root.id,date)){toast("오늘 작업은 이미 기록되어 있어");return;}
+  const idx=state.logs.findIndex(x=>x.id===id),updated=normalizeLog({...root,status:"pending",requestState:"in_progress",actualStartedAt:nowLocalDateTime(now),
+    updatedAt:mutationTimestamp(root.updatedAt),deviceId:DEVICE_ID});
+  if(!updated)return;const work=makeRequestWorkLog(updated,date,now,"");if(!work)return;
+  const next=state.logs.slice();next[idx]=updated;next.push(work);
+  if(!persistLogsAndQueueActions(next,[{action:"UPDATE_LOG",payload:logPayload(updated)},{action:"ADD_LOG",payload:logPayload(work)}]))return;
+  state.currentDate=date;state.followToday=true;renderToday();toast("진행을 시작하고 오늘 작업을 기록했어");
+}
+function recordRequestToday(id) {
+  const root=state.logs.find(x=>x.id===id&&!x.deleted); if(!root||root.requestState!=="in_progress")return;
+  const date=todayStr(),existing=requestWorkLogOnDate(root.id,date);if(existing){state.currentDate=date;state.followToday=true;renderToday();toast("오늘 작업은 이미 기록되어 있어");return;}
+  const work=makeRequestWorkLog(root,date,new Date(),"");if(!work)return;
+  if(!persistLogsAndQueueActions([...state.logs,work],[{action:"ADD_LOG",payload:logPayload(work)}]))return;
+  state.currentDate=date;state.followToday=true;renderToday();toast("오늘 작업을 기록했어");
+}
+function completeRequest(id) {
+  const root=state.logs.find(x=>x.id===id&&!x.deleted);if(!root||!root.requestState||root.requestState==="done")return;
+  const now=new Date(),date=todayStr(now),idx=state.logs.findIndex(x=>x.id===id),actions=[],next=state.logs.slice();
+  const updated=normalizeLog({...root,status:"pending",requestState:"done",completedAt:nowLocalDateTime(now),actualStartedAt:root.actualStartedAt||nowLocalDateTime(now),
+    updatedAt:mutationTimestamp(root.updatedAt),deviceId:DEVICE_ID});if(!updated)return;next[idx]=updated;actions.push({action:"UPDATE_LOG",payload:logPayload(updated)});
+  if(!requestWorkLogOnDate(root.id,date)){
+    const work=makeRequestWorkLog(updated,date,now,"");if(!work)return;next.push(work);actions.push({action:"ADD_LOG",payload:logPayload(work)});
+  }
+  if(!persistLogsAndQueueActions(next,actions))return;state.currentDate=date;state.followToday=true;renderToday();toast("요청을 완료했어");
 }
 function postponePending(id, days) {
-  const item = state.logs.find(x => x.id === id);
-  if (!item || item.status !== "pending") return;
-  const dueDate = addDays(item.dueDate || todayStr(), days);
-  if (!updateLog(id, { dueDate, date:dueDate })) return;
-  renderToday();
+  const item=state.logs.find(x=>x.id===id);if(!item||item.requestState!=="waiting")return;
+  const dueDate=addDays(item.dueDate||todayStr(),days);if(!updateLog(id,{dueDate,date:dueDate}))return;renderToday();
 }
 function deleteLogItem(id) {
   const idx=state.logs.findIndex(x=>x.id===id); if(idx<0)return; const item={...state.logs[idx],deleted:true,updatedAt:mutationTimestamp(state.logs[idx].updatedAt),deviceId:DEVICE_ID};
@@ -434,24 +490,23 @@ function updateLog(id,fields) {
   const next=state.logs.slice();next[idx]=normalized;return persistLogAndQueue(next,"UPDATE_LOG",logPayload(normalized));
 }
 function returnToPending(id) {
-  const item = state.logs.find(x => x.id === id);
-  if (!item || item.origin !== "request" || item.status === "pending") return false;
-  const dueDate = item.dueDate || item.date || todayStr();
-  return updateLog(id, { status:"pending", dueDate, date:dueDate, actualStartedAt:"" });
+  const item=state.logs.find(x=>x.id===id);
+  if(!item||item.origin!=="request"||item.status==="pending"||item.requestId||item.requestState)return false;
+  const dueDate=item.dueDate||item.date||todayStr();
+  return updateLog(id,{status:"pending",dueDate,date:dueDate,actualStartedAt:"",requestState:"waiting",completedAt:""});
 }
 function toggleHighlight(id) {
-  const item = state.logs.find(x => x.id === id);
-  if (!item) return;
-  updateLog(id, { highlight: !item.highlight });
-  renderCurrentView();
+  const item=state.logs.find(x=>x.id===id);if(!item)return;updateLog(id,{highlight:!item.highlight});renderCurrentView();
 }
 function logsForDate(date) {
-  return state.logs.filter(x => !x.deleted && x.status !== "pending" && x.date === date).sort((a,b) => a.time.localeCompare(b.time) || a.updatedAt - b.updatedAt);
+  return state.logs.filter(x=>!x.deleted&&x.status!=="pending"&&x.date===date).sort((a,b)=>a.time.localeCompare(b.time)||a.updatedAt-b.updatedAt);
 }
 function pendingLogs() {
-  return state.logs.filter(x => !x.deleted && x.status === "pending").sort((a,b) => (a.dueDate || "9999").localeCompare(b.dueDate || "9999") || (a.requestedAt || "").localeCompare(b.requestedAt || ""));
+  return requestRoots(false).sort((a,b)=>{
+    const rank=x=>x.requestState==="in_progress"?0:1,ra=rank(a),rb=rank(b);if(ra!==rb)return ra-rb;
+    return (a.dueDate||"9999").localeCompare(b.dueDate||"9999")||(a.requestedAt||"").localeCompare(b.requestedAt||"");
+  });
 }
-
 function getReflection(date) {
   return state.reflections[date]||{date,summary:"",difficulty:"",achievement:"",tomorrow:"",updatedAt:0,deviceId:""};
 }
@@ -500,92 +555,69 @@ function logRowHtml(item) {
   </div>`;
 }
 
+function requestCardHtml(x) {
+  const due=x.dueDate||x.date,overdue=x.requestState!=="done"&&due&&due<todayStr(),when=due===todayStr()?"오늘":due===addDays(todayStr(),1)?"내일":formatShortDate(due);
+  const works=requestWorkLogs(x.id),days=new Set(works.map(w=>w.date)).size,todayDone=!!requestWorkLogOnDate(x.id,todayStr());
+  const stateLabel=x.requestState==="in_progress"?"진행중":"대기";
+  return `<article class="pending-card request-${escapeAttr(x.requestState)}" data-id="${escapeAttr(x.id)}">
+    <div class="pending-main"><div class="pending-title"><span class="request-state-tag ${escapeAttr(x.requestState)}">${stateLabel}</span>${escapeHtml(x.content)}</div>
+    <div class="pending-meta">${x.requester?escapeHtml(x.requester)+" · ":""}${x.requestedAt?formatDateTime(x.requestedAt)+" 요청 · ":""}<span class="pending-due${overdue?" overdue":""}">${overdue?"기한 지남 · ":""}${escapeHtml(when)}</span>${days?` · 작업 ${days}일`:""}${x.meeting?" · 회의":""}${x.solved?" · 문제해결":""}${x.support?" · 협업·지원":""}${x.project?" · "+escapeHtml(x.project):""}</div></div>
+    ${x.requestState==="waiting"?`<button class="start-btn" data-start="${escapeAttr(x.id)}">시작</button>`:`<button class="start-btn${todayDone?" done":""}" data-work-today="${escapeAttr(x.id)}" ${todayDone?"disabled":""}>${todayDone?"오늘 기록됨":"오늘 기록"}</button>`}
+    <div class="pending-actions">${x.requestState==="waiting"?`<button class="text-btn" data-tomorrow="${escapeAttr(x.id)}">+1일</button>`:`<button class="text-btn complete-btn" data-complete="${escapeAttr(x.id)}">완료</button>`}<button class="text-btn" data-edit="${escapeAttr(x.id)}">수정</button></div>
+  </article>`;
+}
 function renderToday() {
-  const current = normalizeDateStr(state.currentDate);
-  const [cy, cm, cd] = current.split("-").map(Number);
-  const cdt = new Date(cy, cm - 1, cd);
-  $("todayDateMain").textContent = `${cm}월 ${cd}일`;
-  $("todayDateSub").textContent = `${cy}년 · ${WEEKDAY_KR[cdt.getDay()]}요일`;
-  $("reflectionTitle").textContent = state.currentDate === todayStr() ? "오늘 회고" : "이 날 회고";
-  const rh=$("recordingDateHint"); if(rh){const past=state.currentDate!==todayStr();rh.hidden=!past;rh.textContent=past?`${formatShortDate(state.currentDate)}에 기록 중`:"";}
+  const current=normalizeDateStr(state.currentDate),[cy,cm,cd]=current.split("-").map(Number),cdt=new Date(cy,cm-1,cd);
+  $("todayDateMain").textContent=`${cm}월 ${cd}일`;$("todayDateSub").textContent=`${cy}년 · ${WEEKDAY_KR[cdt.getDay()]}요일`;
+  $("reflectionTitle").textContent=state.currentDate===todayStr()?"오늘 회고":"이 날 회고";
+  const rh=$("recordingDateHint");if(rh){const past=state.currentDate!==todayStr();rh.hidden=!past;rh.textContent=past?`${formatShortDate(state.currentDate)}에 기록 중`:"";}
   requesterOptions();
-
-  const pending = pendingLogs();
-  $("pendingSection").hidden = pending.length === 0;
-  $("pendingCount").textContent = pending.length ? String(pending.length) : "";
-  $("pendingList").innerHTML = pending.map(x => {
-    const due = x.dueDate || x.date;
-    const overdue = due && due < todayStr();
-    const when = due === todayStr() ? "오늘" : due === addDays(todayStr(),1) ? "내일" : formatShortDate(due);
-    return `<article class="pending-card" data-id="${escapeAttr(x.id)}">
-      <div class="pending-main"><div class="pending-title">${escapeHtml(x.content)}</div>
-      <div class="pending-meta">${x.requester ? escapeHtml(x.requester) + " · " : ""}${x.requestedAt ? formatDateTime(x.requestedAt) + " 요청 · " : ""}<span class="pending-due${overdue ? " overdue" : ""}">${overdue ? "기한 지남 · " : ""}${escapeHtml(when)}</span>${x.meeting ? " · 회의" : ""}${x.solved ? " · 문제해결" : ""}${x.support ? " · 협업·지원" : ""}${x.project ? " · " + escapeHtml(x.project) : ""}</div></div>
-      <button class="start-btn" data-start="${escapeAttr(x.id)}">시작</button>
-      <div class="pending-actions"><button class="text-btn" data-tomorrow="${escapeAttr(x.id)}">+1일</button><button class="text-btn" data-edit="${escapeAttr(x.id)}">수정</button></div>
-    </article>`;
-  }).join("");
-
-  const items = logsForDate(state.currentDate);
-  $("dayCount").textContent = items.length ? `${items.length}건` : "";
-  $("timeline").innerHTML = items.length ? items.map(logRowHtml).join("") : `<div class="timeline-empty">아직 기록이 없어.</div>`;
-
-  const r = getReflection(state.currentDate);
-  $("fSummary").value = r.summary;
-  $("fDifficulty").value = r.difficulty;
-  $("fAchievement").value = r.achievement;
-  $("fTomorrow").value = r.tomorrow;
-  updateReflectionHint();
+  const requests=pendingLogs(),progress=requests.filter(x=>x.requestState==="in_progress"),waiting=requests.filter(x=>x.requestState==="waiting");
+  $("pendingSection").hidden=requests.length===0;$("pendingCount").textContent=requests.length?String(requests.length):"";
+  $("pendingList").innerHTML=requests.length?`${progress.length?`<div class="request-group"><div class="request-group-title">진행 중 <span>${progress.length}</span></div>${progress.map(requestCardHtml).join("")}</div>`:""}${waiting.length?`<div class="request-group"><div class="request-group-title">대기 <span>${waiting.length}</span></div>${waiting.map(requestCardHtml).join("")}</div>`:""}`:"";
+  const items=logsForDate(state.currentDate);$("dayCount").textContent=items.length?`${items.length}건`:"";$("timeline").innerHTML=items.length?items.map(logRowHtml).join(""):`<div class="timeline-empty">아직 기록이 없어.</div>`;
+  const r=getReflection(state.currentDate);$("fSummary").value=r.summary;$("fDifficulty").value=r.difficulty;$("fAchievement").value=r.achievement;$("fTomorrow").value=r.tomorrow;updateReflectionHint();
 }
 
 function monthKey(year, month0) { return `${year}-${String(month0+1).padStart(2,"0")}`; }
 function renderSummary() {
-  const key = monthKey(state.summaryYear, state.summaryMonth);
-  $("monthLabel").textContent = `${state.summaryYear}년 ${state.summaryMonth+1}월`;
-  const rows = state.logs.filter(x => !x.deleted && x.status !== "pending" && x.date.startsWith(key));
-  const requestsReceived = state.logs.filter(x => !x.deleted && ((x.origin === "request" && (x.requestedAt || "").startsWith(key)) || (x.cat === "요청" && !x.requestedAt && x.date.startsWith(key))));
-  const pendingCreated = requestsReceived.filter(x => x.status === "pending");
-  const highlights = rows.filter(x => x.highlight);
-  const self = rows.filter(x => x.origin === "self");
-  const requestsProcessed = rows.filter(x => x.origin === "request" || x.cat === "요청");
-  const meetings = rows.filter(x => x.meeting);
-  const solved = rows.filter(x => x.solved);
-  const supports = rows.filter(x => x.support);
-  const projects = {};
-  rows.forEach(x => { if (x.project) projects[x.project] = (projects[x.project] || 0) + 1; });
-  const projectEntries = Object.entries(projects).sort((a,b) => b[1]-a[1]);
-  const refl = Object.values(state.reflections).filter(r => r.date.startsWith(key)).sort((a,b) => b.date.localeCompare(a.date));
-
-  const list = arr => arr.length ? `<div class="summary-list">${arr.map(x => {
-    const meta = [formatShortDate(x.date)];
-    const legacyRepresentedByFlag = (x.cat === "해결" && x.solved) || (x.cat === "회의" && x.meeting);
-    if (x.cat && x.cat !== "업무" && !legacyRepresentedByFlag) meta.push(CAT_LABEL[x.cat] || x.cat);
-    if (x.meeting) meta.push("회의");
-    if (x.solved) meta.push("문제해결");
-    if (x.support) meta.push("협업·지원");
-    if (x.requester) meta.push(x.requester);
-    if (x.project) meta.push(x.project);
-    return `<div class="summary-item"><div class="title">${escapeHtml(x.content)}</div><div class="meta">${meta.map(escapeHtml).join(" · ")}</div></div>`;
-  }).join("")}</div>` : `<div class="summary-empty">기록 없음</div>`;
-  const reflEntries = refl.filter(r => r.achievement || r.difficulty);
-
-  $("monthSummary").innerHTML = `
+  const key=monthKey(state.summaryYear,state.summaryMonth);$("monthLabel").textContent=`${state.summaryYear}년 ${state.summaryMonth+1}월`;
+  const rows=state.logs.filter(x=>!x.deleted&&x.status!=="pending"&&x.date.startsWith(key));
+  const roots=requestRoots(true);
+  const legacyRequests=state.logs.filter(x=>!x.deleted&&!x.requestId&&!x.requestState&&((x.origin==="request"&&(x.requestedAt||x.date).startsWith(key))||(x.cat==="요청"&&!x.requestedAt&&x.date.startsWith(key))));
+  const receivedRoots=roots.filter(x=>(x.requestedAt||x.date).startsWith(key));
+  const requestsReceived=[...receivedRoots,...legacyRequests];
+  const completedRoots=roots.filter(x=>x.requestState==="done"&&(x.completedAt||"").startsWith(key));
+  const legacyCompleted=legacyRequests.filter(x=>x.status!=="pending");
+  const completedRequests=[...completedRoots,...legacyCompleted];
+  const inProgressRequests=roots.filter(x=>x.requestState==="in_progress"&&requestWorkLogs(x.id).some(w=>w.date.startsWith(key)));
+  const highlights=rows.filter(x=>x.highlight),self=rows.filter(x=>x.origin==="self"),meetings=rows.filter(x=>x.meeting),solved=rows.filter(x=>x.solved),supports=rows.filter(x=>x.support);
+  const projects={};rows.forEach(x=>{if(x.project)projects[x.project]=(projects[x.project]||0)+1;});const projectEntries=Object.entries(projects).sort((a,b)=>b[1]-a[1]);
+  const refl=Object.values(state.reflections).filter(r=>r.date.startsWith(key)).sort((a,b)=>b.date.localeCompare(a.date));
+  const list=arr=>arr.length?`<div class="summary-list">${arr.map(x=>{const displayDate=x.requestState?(x.completedAt?x.completedAt.slice(0,10):(x.requestedAt?x.requestedAt.slice(0,10):x.date)):x.date;const meta=[formatShortDate(displayDate)];
+    const legacyRepresentedByFlag=(x.cat==="해결"&&x.solved)||(x.cat==="회의"&&x.meeting);if(x.cat&&x.cat!=="업무"&&!legacyRepresentedByFlag)meta.push(CAT_LABEL[x.cat]||x.cat);
+    if(x.requestState)meta.push(x.requestState==="done"?"완료":x.requestState==="in_progress"?"진행중":"대기");if(x.meeting)meta.push("회의");if(x.solved)meta.push("문제해결");if(x.support)meta.push("협업·지원");if(x.requester)meta.push(x.requester);if(x.project)meta.push(x.project);
+    return `<div class="summary-item"><div class="title">${escapeHtml(x.content)}</div><div class="meta">${meta.map(escapeHtml).join(" · ")}</div></div>`;}).join("")}</div>`:`<div class="summary-empty">기록 없음</div>`;
+  const reflEntries=refl.filter(r=>r.achievement||r.difficulty);
+  $("monthSummary").innerHTML=`
     <section class="summary-card"><h2>대표 업무</h2>${list(highlights)}</section>
     <section class="summary-card"><h2>업무 흐름</h2><div class="metric-grid">
-      <div class="metric"><strong>${rows.length}</strong><span>전체 기록</span></div>
-      <div class="metric"><strong>${requestsReceived.length}</strong><span>요청받음</span></div>
-      <div class="metric"><strong>${requestsProcessed.length}</strong><span>요청 처리</span></div>
+      <div class="metric"><strong>${rows.length}</strong><span>전체 작업 기록</span></div>
+      <div class="metric"><strong>${requestsReceived.length}</strong><span>요청받은 업무</span></div>
+      <div class="metric"><strong>${completedRequests.length}</strong><span>완료한 요청</span></div>
+      <div class="metric"><strong>${inProgressRequests.length}</strong><span>진행 중 요청</span></div>
       <div class="metric"><strong>${self.length}</strong><span>내가 먼저 함</span></div>
       <div class="metric"><strong>${meetings.length}</strong><span>회의</span></div>
       <div class="metric"><strong>${solved.length}</strong><span>문제해결</span></div>
       <div class="metric"><strong>${supports.length}</strong><span>협업·지원</span></div>
-      <div class="metric"><strong>${pendingCreated.length}</strong><span>요청 중 대기</span></div>
     </div></section>
+    <section class="summary-card"><h2>완료한 요청</h2>${list(completedRequests)}</section>
     <section class="summary-card"><h2>내가 먼저 챙긴 일</h2>${list(self)}</section>
     <section class="summary-card"><h2>해결한 문제</h2>${list(solved)}</section>
     <section class="summary-card"><h2>협업·지원</h2>${list(supports)}</section>
     <section class="summary-card"><h2>회의 기록</h2>${list(meetings)}</section>
-    <section class="summary-card"><h2>프로젝트·회사 기여</h2>${projectEntries.length ? `<div class="project-chips">${projectEntries.map(([p,n]) => `<span class="project-chip">${escapeHtml(p)} · ${n}</span>`).join("")}</div>` : `<div class="summary-empty">프로젝트를 적은 기록이 아직 없어.</div>`}</section>
-    <section class="summary-card"><h2>회고에서 남긴 성장·부담 신호</h2>${reflEntries.length ? `<div class="reflection-month">${reflEntries.map(r => `<div class="entry"><div class="date">${formatShortDate(r.date)}</div>${r.achievement ? `<div class="text"><strong>잘한 점</strong> ${escapeHtml(r.achievement)}</div>` : ""}${r.difficulty ? `<div class="text"><strong>힘들었던 점</strong> ${escapeHtml(r.difficulty)}</div>` : ""}</div>`).join("")}</div>` : `<div class="summary-empty">작성한 회고가 없어.</div>`}</section>`;
+    <section class="summary-card"><h2>프로젝트·회사 기여</h2>${projectEntries.length?`<div class="project-chips">${projectEntries.map(([p,n])=>`<span class="project-chip">${escapeHtml(p)} · ${n}</span>`).join("")}</div>`:`<div class="summary-empty">프로젝트를 적은 기록이 아직 없어.</div>`}</section>
+    <section class="summary-card"><h2>회고에서 남긴 성장·부담 신호</h2>${reflEntries.length?`<div class="reflection-month">${reflEntries.map(r=>`<div class="entry"><div class="date">${formatShortDate(r.date)}</div>${r.achievement?`<div class="text"><strong>잘한 점</strong> ${escapeHtml(r.achievement)}</div>`:""}${r.difficulty?`<div class="text"><strong>힘들었던 점</strong> ${escapeHtml(r.difficulty)}</div>`:""}</div>`).join("")}</div>`:`<div class="summary-empty">작성한 회고가 없어.</div>`}</section>`;
 }
 
 function allDatesWithData() {
@@ -640,31 +672,13 @@ function modalFocusable() {
     .filter(el => !el.hidden && el.offsetParent !== null);
 }
 function openEdit(id) {
-  const item = state.logs.find(x => x.id === id); if (!item) return;
-  state.editId = id;
-  modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  $("editDate").value = item.date;
-  $("editTime").value = item.time;
-  const legacyCat = item.cat && item.cat !== "업무" ? (CAT_LABEL[item.cat] || item.cat) : "";
-  $("editLegacyCatWrap").hidden = !legacyCat;
-  $("editLegacyCat").textContent = legacyCat;
-  $("editContent").value = item.content;
-  $("editOrigin").value = item.origin;
-  $("editRequester").value = item.requester;
-  $("editRequestedAt").value = item.requestedAt;
-  $("editDueDate").value = item.dueDate;
-  $("editProject").value = item.project;
-  $("editMemo").value = item.memo;
-  $("editMeeting").checked = !!item.meeting;
-  $("editSolved").checked = !!item.solved;
-  $("editSupport").checked = !!item.support;
-  $("editHighlight").checked = !!item.highlight;
-  $("editRequestFields").hidden = item.origin !== "request";
-  $("editReturnPendingBtn").hidden = !(item.origin === "request" && item.status !== "pending");
-  history.pushState({view:state.currentView,modal:id},"",location.href);
-  $("editModal").hidden = false;
-  document.body.classList.add("modal-open");
-  requestAnimationFrame(() => $("editContent").focus());
+  const item=state.logs.find(x=>x.id===id);if(!item)return;state.editId=id;modalReturnFocus=document.activeElement instanceof HTMLElement?document.activeElement:null;
+  const root=!!item.requestState&&!item.requestId;$("editDate").value=item.date;$("editTime").value=item.time;$("editDateTimeWrap").hidden=root;
+  const legacyCat=item.cat&&item.cat!=="업무"?(CAT_LABEL[item.cat]||item.cat):"";$("editLegacyCatWrap").hidden=!legacyCat;$("editLegacyCat").textContent=legacyCat;
+  $("editContent").value=item.content;$("editOrigin").value=item.origin;$("editRequester").value=item.requester;$("editRequestedAt").value=item.requestedAt;$("editDueDate").value=item.dueDate;
+  $("editProject").value=item.project;$("editMemo").value=item.memo;$("editMeeting").checked=!!item.meeting;$("editSolved").checked=!!item.solved;$("editSupport").checked=!!item.support;$("editHighlight").checked=!!item.highlight;
+  $("editRequestFields").hidden=item.origin!=="request";$("editReturnPendingBtn").hidden=!(item.origin==="request"&&item.status!=="pending"&&!item.requestId&&!item.requestState);
+  history.pushState({view:state.currentView,modal:id},"",location.href);$("editModal").hidden=false;document.body.classList.add("modal-open");requestAnimationFrame(()=>$("editContent").focus());
 }
 function closeEdit(fromHistory=false) {
   const hadModal=!$("editModal").hidden;
@@ -674,12 +688,19 @@ function closeEdit(fromHistory=false) {
 }
 function saveEdit() {
   const id=state.editId;if(!id)return;const item=state.logs.find(x=>x.id===id);if(!item)return;const content=$("editContent").value.trim();if(!content){toast("업무명을 입력해줘");return;}
-  const origin=$("editOrigin").value,date=normalizeDateStr($("editDate").value),time=normalizeTimeStr($("editTime").value);if(!date||!time){toast("날짜나 시간이 올바르지 않아");return;}
-  let status=item.status; if(origin!=="request"&&status==="pending")status="logged";
+  const origin=$("editOrigin").value,isRoot=!!item.requestState&&!item.requestId;
+  let date=normalizeDateStr($("editDate").value),time=normalizeTimeStr($("editTime").value),dueDate=origin==="request"?normalizeDateStr($("editDueDate").value):"";
+  if(isRoot&&origin==="request")date=dueDate||item.date;
+  if(!date||!time){toast("날짜나 시간이 올바르지 않아");return;}
+  let status=item.status,requestId=item.requestId,requestState=item.requestState,completedAt=item.completedAt,actualStartedAt=item.actualStartedAt;
+  if(origin!=="request"){
+    if(status==="pending")status="logged";requestId="";requestState="";completedAt="";actualStartedAt=`${date}T${time}`;
+  }else if(isRoot){
+    status="pending";actualStartedAt=item.actualStartedAt;
+  }else if(status!=="pending")actualStartedAt=`${date}T${time}`;
   const fields={date,time,content,origin,status,requester:origin==="request"?$("editRequester").value.trim():"",requestedAt:origin==="request"?$("editRequestedAt").value:"",
-    dueDate:origin==="request"?$("editDueDate").value:"",project:$("editProject").value.trim(),memo:$("editMemo").value.trim(),
-    meeting:$("editMeeting").checked,solved:$("editSolved").checked,support:$("editSupport").checked,
-    highlight:$("editHighlight").checked,actualStartedAt:status==="pending"?"":`${date}T${time}`};
+    dueDate,project:$("editProject").value.trim(),memo:$("editMemo").value.trim(),meeting:$("editMeeting").checked,solved:$("editSolved").checked,support:$("editSupport").checked,
+    highlight:$("editHighlight").checked,actualStartedAt,requestId,requestState,completedAt};
   if(!updateLog(id,fields))return;closeEdit();renderCurrentView();toast("수정했어");
 }
 
@@ -689,9 +710,9 @@ function downloadBackup() {
   downloadText(`업무일지_백업_${todayStr()}.json`,JSON.stringify(data,null,2),"application/json;charset=utf-8");
 }
 function downloadCsv(){
-  const head=["날짜","시간","업무명","발생경로","요청자","예정일","프로젝트","메모","회의","문제해결","협업·지원","대표업무","기존종류","상태","삭제"];
+  const head=["날짜","시간","업무명","발생경로","요청자","예정일","프로젝트","메모","회의","문제해결","협업·지원","대표업무","기존종류","상태","요청ID","요청상태","완료시각","삭제"];
   const q=v=>`"${String(v??"").replace(/"/g,'""')}"`;
-  const rows=state.logs.slice().sort((a,b)=>a.date.localeCompare(b.date)||a.time.localeCompare(b.time)).map(x=>[x.date,x.time,x.content,x.origin,x.requester,x.dueDate,x.project,x.memo,x.meeting?"Y":"",x.solved?"Y":"",x.support?"Y":"",x.highlight?"Y":"",x.cat,x.status,x.deleted?"Y":""].map(q).join(","));
+  const rows=state.logs.slice().sort((a,b)=>a.date.localeCompare(b.date)||a.time.localeCompare(b.time)).map(x=>[x.date,x.time,x.content,x.origin,x.requester,x.dueDate,x.project,x.memo,x.meeting?"Y":"",x.solved?"Y":"",x.support?"Y":"",x.highlight?"Y":"",x.cat,x.status,x.requestId,x.requestState,x.completedAt,x.deleted?"Y":""].map(q).join(","));
   downloadText(`업무일지_${todayStr()}.csv`,[head.map(q).join(","),...rows].join("\r\n"),"text/csv;charset=utf-8",true);
 }
 function previewAndRestoreBackup(data){
@@ -727,13 +748,19 @@ function bindEvents() {
 
   document.addEventListener("click",e=>{
     const start=e.target.closest("[data-start]");if(start){startPending(start.dataset.start);return;}
+    const work=e.target.closest("[data-work-today]");if(work){recordRequestToday(work.dataset.workToday);return;}
+    const complete=e.target.closest("[data-complete]");if(complete){completeRequest(complete.dataset.complete);return;}
     const tomorrow=e.target.closest("[data-tomorrow]");if(tomorrow){postponePending(tomorrow.dataset.tomorrow,1);return;}
     const star=e.target.closest("[data-star]");if(star){toggleHighlight(star.dataset.star);return;}
     const edit=e.target.closest("[data-edit]");if(edit){openEdit(edit.dataset.edit);return;}
     if(e.target.closest("[data-close-modal]"))closeEdit();
   });
 
-  $("editOrigin").addEventListener("change",e=>{$("editRequestFields").hidden=e.target.value!=="request";});
+  $("editOrigin").addEventListener("change",e=>{
+    $("editRequestFields").hidden=e.target.value!=="request";
+    const item=state.logs.find(x=>x.id===state.editId),root=!!item?.requestState&&!item?.requestId;
+    $("editDateTimeWrap").hidden=root&&e.target.value==="request";
+  });
   $("editSaveBtn").addEventListener("click",saveEdit);
   $("editReturnPendingBtn").addEventListener("click",()=>{const id=state.editId;if(!id||!returnToPending(id))return;closeEdit();renderCurrentView();toast("해야 할 요청으로 되돌렸어");});
   $("editDeleteBtn").addEventListener("click",()=>{if(!state.editId||!confirm("이 기록을 삭제할까?"))return;const id=state.editId;closeEdit();if(deleteLogItem(id))toast("삭제했어");});
