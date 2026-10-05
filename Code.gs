@@ -1,5 +1,5 @@
 // ============================================================
-// 업무일지 PWA v8.5 백엔드
+// 업무일지 PWA v8.6.1 백엔드
 // - 기존 Log / 로그, Reflection / 회고 데이터 하위 호환
 // - 모든 쓰기는 GET + query string
 // - 수정시각 + deviceId 버전 비교, tombstone, revision 증분 동기화
@@ -11,6 +11,8 @@ const SCHEMA_VERSION = 3;
 
 const LOG_SHEET = "Log";
 const REFL_SHEET = "Reflection";
+const FAV_SHEET = "Favorites";
+const FAV_HEADERS = ["id","kind","label","order","deleted","updatedAt","deviceId","rev"];
 const LEGACY_LOG_SHEET = "로그";
 const LEGACY_REFL_SHEET = "회고";
 const REVISION_KEY = "worklog_revision";
@@ -447,7 +449,7 @@ function readAllReflections_() {
 }
 
 function applyAction_(action, payload) {
-  const allowed = ["ADD_LOG", "UPDATE_LOG", "DELETE_LOG", "UPSERT_REFLECTION"];
+  const allowed = ["ADD_LOG", "UPDATE_LOG", "DELETE_LOG", "UPSERT_REFLECTION", "UPSERT_FAVORITE", "DELETE_FAVORITE"];
   if (!allowed.includes(action)) throw new Error("UNKNOWN_ACTION");
 
   const lock = LockService.getScriptLock();
@@ -482,6 +484,21 @@ function applyAction_(action, payload) {
       return { skipped: false, revision: row.rev };
     }
 
+
+    if(action === "UPSERT_FAVORITE" || action === "DELETE_FAVORITE") {
+      const incoming=cleanFavoritePayload_(payload||{});
+      if(action==="DELETE_FAVORITE")incoming.deleted=true;
+      const found=findExisting_([FAV_SHEET],"id",incoming.id,FAV_HEADERS,{});
+      if(found) {
+        if(found.item.kind!==incoming.kind)throw new Error("즐겨찾기 종류는 바꿀 수 없어");
+        const cmp=compareVersion_(found.item,incoming);
+        if(cmp>=0)return {skipped:true,revision:currentRevision_()};
+      }
+      const merged={...incoming,rev:nextRevision_()};
+      const target=found||{sheet:getSheet_(FAV_SHEET,FAV_HEADERS),row:0};
+      writeObjectRow_(target.sheet,target.row,FAV_HEADERS,{},merged);
+      return {skipped:false,revision:merged.rev};
+    }
     const incoming = cleanReflectionPayload_(payload || {});
     const found = findExisting_([REFL_SHEET, LEGACY_REFL_SHEET], "date", incoming.date, REFL_HEADERS, REFL_ALIASES);
     if (found) { const cmp = compareVersion_(found.item, incoming); if (cmp > 0 || (cmp === 0 && incoming.deviceId && incoming.deviceId === String(found.item.deviceId || ""))) return { skipped: true, revision: currentRevision_() }; }
@@ -498,7 +515,7 @@ function responseBase_() {
   return {
     appId: APP_ID,
     schemaVersion: SCHEMA_VERSION,
-    capabilities: ["contextFlagsV1", "requestWorkflowV1"],
+    capabilities: ["contextFlagsV1", "requestWorkflowV1", "favoritesV1", "favoritesSyncV2"],
     storeId: storeId_(),
     serverTime: Date.now(),
     revision: currentRevision_()
@@ -531,7 +548,7 @@ function doGet(event) {
     }
   }
 
-  if (["ADD_LOG", "UPDATE_LOG", "DELETE_LOG", "UPSERT_REFLECTION"].includes(action)) {
+  if (["ADD_LOG", "UPDATE_LOG", "DELETE_LOG", "UPSERT_REFLECTION", "UPSERT_FAVORITE", "DELETE_FAVORITE"].includes(action)) {
     if (!event.parameter.payload) return fail_("payload가 없어", "BAD_PAYLOAD");
     try {
       const result = applyAction_(action, JSON.parse(event.parameter.payload));
@@ -553,6 +570,15 @@ function doGet(event) {
 
     const logs = readAllLogs_();
     const reflections = readAllReflections_();
+    const rawFavoriteSince=event.parameter.sinceFavoriteRev;
+    const explicitFavoriteSince=rawFavoriteSince!==undefined&&rawFavoriteSince!==null&&String(rawFavoriteSince)!=="";
+    const favoriteSince=explicitFavoriteSince?Number(rawFavoriteSince):sinceRev;
+    const favoritesFull=explicitFavoriteSince?
+      (!Number.isFinite(favoriteSince)||favoriteSince<=0||favoriteSince>currentRev):(forceFull||sinceRev===0);
+    let favoriteRows=[],favoritesError="";
+    try {favoriteRows=readAllFavorites_();if(!favoritesFull)favoriteRows=favoriteRows.filter(row=>Number(row.rev||0)>favoriteSince);}
+    catch(error){favoritesError="Favorites 시트를 읽지 못했어";}
+
     let logRows = logs.rows;
     let reflObj = reflections.reflections;
 
@@ -567,6 +593,11 @@ function doGet(event) {
       full: forceFull || sinceRev === 0,
       logs: logRows,
       reflections: reflObj,
+      revision: currentRev,
+      favoritesRevision: currentRev,
+      favoritesFull,
+      favoritesError: favoritesError||undefined,
+      favorites: favoritesError?undefined:favoriteRows,
       sources: (forceFull || sinceRev === 0) ? { logs: logs.sources, reflections: reflections.sources } : undefined
     });
   } catch (err) {
@@ -577,3 +608,21 @@ function doGet(event) {
 function doPost() {
   return fail_("POST는 지원하지 않아. GET을 사용해줘.", "METHOD_NOT_ALLOWED");
 }
+
+
+function cleanFavoritePayload_(p) {
+  const id=text_(p.id,200,"id",false).trim();
+  if(!id)throw new Error("id 값이 비어 있어");
+  const kind=String(p.kind||"");
+  if(!["requester","project"].includes(kind))throw new Error("즐겨찾기 종류가 올바르지 않아");
+  const label=text_(String(p.label||"").trim(),kind==="requester"?80:120,"즐겨찾기 이름",false);
+  const order=Number(p.order),updatedAt=timestamp_(p.updatedAt);
+  if(!Number.isSafeInteger(order)||order<0)throw new Error("순서가 올바르지 않아");
+  if(updatedAt===null)throw new Error("수정시각이 올바르지 않아");
+  return {id,kind,label,order,deleted:bool_(p.deleted),updatedAt,deviceId:text_(p.deviceId||"",100,"deviceId",true)};
+}
+function readAllFavorites_() {
+  return latestByKey_(readAllRows_(getSheet_(FAV_SHEET,FAV_HEADERS),FAV_HEADERS,{}),"id");
+}
+// 최초 한 번 실행한다. 기존 Log/Reflection 행은 수정하지 않는다.
+function setup() { getSheet_(FAV_SHEET,FAV_HEADERS); }

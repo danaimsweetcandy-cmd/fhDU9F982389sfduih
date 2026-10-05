@@ -55,8 +55,8 @@
 
         <div id="requestFields" class="request-fields" hidden>
           <div class="request-line">
-            <input id="requesterInput" type="text" maxlength="80" list="requesterList" autocomplete="off" placeholder="요청자 이름" aria-label="요청자 이름">
-            <datalist id="requesterList"></datalist>
+            <input id="requesterInput" type="text" maxlength="80" list="requesterList" autocomplete="off" placeholder="요청자 이름" aria-label="요청자 이름"><div class="favorite-input-tools"><div id="requesterInputFavorites" class="favorite-chips" role="group" aria-label="즐겨찾기"></div><button id="requesterInputFavoriteAdd" class="favorite-chip favorite-add" type="button" data-fav-quick="requesterInput" data-fav-kind="requester" aria-label="현재 입력을 즐겨찾기에 추가" disabled>+ 저장</button></div>
+            <datalist id="requesterList"></datalist><datalist id="projectList"></datalist>
           </div>
           <div class="when-row" role="group" aria-label="언제 할 요청인지">
             <button class="when-chip active" data-when="now" type="button">지금</button>
@@ -71,7 +71,7 @@
         <details class="extra-details">
           <summary>추가 정보</summary>
           <div class="extra-grid">
-            <input id="quickProject" type="text" maxlength="120" autocomplete="off" placeholder="프로젝트 (선택)" aria-label="프로젝트">
+            <input id="quickProject" type="text" maxlength="120" autocomplete="off" placeholder="프로젝트 (선택)" aria-label="프로젝트" list="projectList"><div class="favorite-input-tools"><div id="quickProjectFavorites" class="favorite-chips" role="group" aria-label="즐겨찾기"></div><button id="quickProjectFavoriteAdd" class="favorite-chip favorite-add" type="button" data-fav-quick="quickProject" data-fav-kind="project" aria-label="현재 입력을 즐겨찾기에 추가" disabled>+ 저장</button></div>
             <input id="quickMemo" type="text" maxlength="500" autocomplete="off" placeholder="메모 (선택)" aria-label="메모">
           </div>
         </details>
@@ -162,6 +162,15 @@
         </section>
 
         <section class="setting-card">
+          <h2>자주 쓰는 입력</h2>
+          <p class="setting-help">요청자·프로젝트를 종류별 50개까지 등록할 수 있어. 변경 사항은 다른 기기에도 동기화돼. 같은 이름은 하나로 표시하고 병합된 기존 항목은 보존해. 기존 업무 기록의 이름은 그대로 유지돼.</p>
+          <p id="favoriteSyncStatus" class="setting-status" role="status"></p>
+          <h3>요청자</h3><div id="requesterFavoriteList"></div>
+          <button type="button" class="secondary-btn" data-fav-add="requester">+ 요청자 추가</button>
+          <h3>프로젝트</h3><div id="projectFavoriteList"></div>
+          <button type="button" class="secondary-btn" data-fav-add="project">+ 프로젝트 추가</button>
+        </section>
+        <section class="setting-card">
           <h2>데이터</h2>
           <p id="dataStatusText" class="setting-help"></p>
           <div class="settings-actions data-actions">
@@ -194,6 +203,7 @@
     </button>
   </nav>
 
+  <div id="favoriteUndoArea" class="favorite-undo-area" role="status" aria-live="polite" hidden></div>
   <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
 
   <div id="editModal" class="modal" hidden>
@@ -212,12 +222,12 @@
         <label><span>업무명</span><textarea id="editContent" rows="3" maxlength="500"></textarea></label>
         <label><span>발생 경로</span><select id="editOrigin"><option value="">기본</option><option value="request">요청받음</option><option value="self">내가 먼저 함</option></select></label>
         <div id="editRequestFields">
-          <label><span>요청자</span><input id="editRequester" type="text" maxlength="80"></label>
+          <label><span>요청자</span><input id="editRequester" type="text" maxlength="80" list="requesterList"><div class="favorite-input-tools"><div id="editRequesterFavorites" class="favorite-chips" role="group" aria-label="즐겨찾기"></div><button id="editRequesterFavoriteAdd" class="favorite-chip favorite-add" type="button" data-fav-quick="editRequester" data-fav-kind="requester" aria-label="현재 입력을 즐겨찾기에 추가" disabled>+ 저장</button></div></label>
           <label><span>요청받은 시각</span><input id="editRequestedAt" type="datetime-local"></label>
           <label><span>원래 예정일</span><input id="editDueDate" type="date"></label>
         </div>
         <button id="editReturnPendingBtn" class="secondary-btn full" type="button" hidden>해야 할 요청으로 되돌리기</button>
-        <label><span>프로젝트</span><input id="editProject" type="text" maxlength="120"></label>
+        <label><span>프로젝트</span><input id="editProject" type="text" maxlength="120" list="projectList"><div class="favorite-input-tools"><div id="editProjectFavorites" class="favorite-chips" role="group" aria-label="즐겨찾기"></div><button id="editProjectFavoriteAdd" class="favorite-chip favorite-add" type="button" data-fav-quick="editProject" data-fav-kind="project" aria-label="현재 입력을 즐겨찾기에 추가" disabled>+ 저장</button></div></label>
         <label><span>메모</span><textarea id="editMemo" rows="2" maxlength="500"></textarea></label>
         <div class="edit-flags" role="group" aria-label="업무 맥락 태그">
           <label class="check-line"><input id="editMeeting" type="checkbox"><span>회의</span></label>

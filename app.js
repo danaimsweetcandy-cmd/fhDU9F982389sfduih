@@ -1,12 +1,12 @@
 // ============================================================
-// 업무일지 PWA v8.5
+// 업무일지 PWA v8.6.1
 // 기록은 가볍게, 여러 날 이어지는 요청도 날짜별로 남기는 출시 후보
 // ============================================================
 const CONFIG = { GAS_URL: "PUT_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE" };
-const APP_VERSION = "8.5.0";
+const APP_VERSION = "8.6.1";
 const APP_ID = "dayeon-worklog";
 const API_SCHEMA_VERSION = 3;
-const REQUIRED_SERVER_CAPABILITIES = ["contextFlagsV1","requestWorkflowV1"];
+const REQUIRED_SERVER_CAPABILITIES = ["contextFlagsV1","requestWorkflowV1","favoritesV1","favoritesSyncV2"];
 
 const LS_LOGS = "worklog_logs";
 const LS_REFL = "worklog_reflections";
@@ -25,7 +25,7 @@ const FETCH_TIMEOUT_MS = 15000;
 const SYNC_LEASE_MS = 25000;
 const RECOVERY_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 const RECOVERY_MAX = 100;
-const ALLOWED_ACTIONS = new Set(["ADD_LOG","UPDATE_LOG","DELETE_LOG","UPSERT_REFLECTION"]);
+const ALLOWED_ACTIONS = new Set(["ADD_LOG","UPDATE_LOG","DELETE_LOG","UPSERT_REFLECTION","UPSERT_FAVORITE","DELETE_FAVORITE"]);
 
 const CAT_LABEL = {
   "업무": "업무", "수정": "수정", "검수": "검수", "진행관리": "진행관리",
@@ -34,9 +34,9 @@ const CAT_LABEL = {
 const WEEKDAY_KR = ["일", "월", "화", "수", "목", "금", "토"];
 
 const state = {
-  logs: [], reflections: {}, currentDate: todayStr(), activeOrigin: "", requestWhen: "now",
+  logs: [], reflections: {}, favorites: [], currentDate: todayStr(), activeOrigin: "", requestWhen: "now",
   summaryYear: new Date().getFullYear(), summaryMonth: new Date().getMonth(), currentView: "today",
-  editId: null, followToday: true, serverStoreId: "", serverRevision: 0, clockSkewMs: 0
+  editId: null, followToday: true, serverStoreId: "", serverRevision: 0, clockSkewMs: 0, favoriteSyncError: ""
 };
 
 let syncTimer = null;
@@ -54,6 +54,7 @@ let DEVICE_ID = "";
 let lastMutationAt = 0;
 let sharedChannel = null;
 let serverCapabilityVerified = false;
+let settingsConnectionDirty = false;
 
 function $(id) { return document.getElementById(id); }
 function uid() {
@@ -131,6 +132,16 @@ function recoverStorageJournal() {
   }
 }
 function commitStorageChanges(changes) {
+  // Retain legacy FAV jobs when migration has not committed before unrelated Log writes.
+  if(!migratingFavorites&&Object.prototype.hasOwnProperty.call(changes,LS_OUTBOX)){
+    try{
+      const old=JSON.parse(localStorage.getItem(LS_OUTBOX)||"[]"),next=JSON.parse(changes[LS_OUTBOX]);
+      if(Array.isArray(old)&&Array.isArray(next)){
+        const retained=old.filter(x=>x&&isFavoriteAction(x.action)&&!next.some(y=>y&&y.qid===x.qid));
+        if(retained.length)changes={...changes,[LS_OUTBOX]:JSON.stringify([...next,...retained])};
+      }
+    }catch{}
+  }
   for (const key of Object.keys(changes)) { if (protectedCorruptKeys.has(key)) { toast("손상된 원본을 안전하게 보관하지 못해서 이 데이터에는 새로 저장하지 않았어. 저장 공간을 확보한 뒤 앱을 다시 열어줘."); return false; } }
   const entries=Object.entries(changes).map(([key,after])=>({key,before:localStorage.getItem(key),after:String(after)}));
   const journal=JSON.stringify({id:qid(),createdAt:Date.now(),changes:entries});
@@ -212,14 +223,15 @@ function readReflectionsStorage() {
 }
 function validOutboxItem(item) { return !!(item&&typeof item==="object"&&ALLOWED_ACTIONS.has(item.action)&&item.payload&&typeof item.payload==="object"&&typeof item.qid==="string"&&item.qid); }
 function getOutbox() {
+  migrateFavoriteQueue();
   const parsed=readJsonRaw(LS_OUTBOX,[]); if(!Array.isArray(parsed)){quarantineRaw(LS_OUTBOX,JSON.stringify(parsed),"outbox is not array");return [];}
   const valid=[],bad=[]; for(const item of parsed){ if(validOutboxItem(item))valid.push({...item,queuedAt:Number(item.queuedAt)||Date.now()}); else bad.push(item); }
-  if(bad.length){if(preserveInvalidItems(LS_OUTBOX,bad,"invalid outbox items")) safeStorageSet(LS_OUTBOX,JSON.stringify(valid),true);} return valid;
+  if(bad.length){if(preserveInvalidItems(LS_OUTBOX,bad,"invalid outbox items")) safeStorageSet(LS_OUTBOX,JSON.stringify(valid),true);} return valid.filter(x=>!isFavoriteAction(x.action));
 }
 function setOutbox(v) { return safeStorageSet(LS_OUTBOX,JSON.stringify(v)); }
-function loadLocal() { recoverStorageJournal(); state.logs=readLogsStorage(); state.reflections=readReflectionsStorage(); getOutbox(); }
-function reloadSharedState() { state.logs=readLogsStorage(); state.reflections=readReflectionsStorage(); renderCurrentView(); refreshSyncState(); }
-function getOutboxKey(action,payload) { if(!payload)return null; if(action==="UPSERT_REFLECTION")return "REFL:"+payload.date; if(payload.id!==undefined)return "LOG:"+payload.id; return null; }
+function loadLocal() { recoverStorageJournal(); state.logs=readLogsStorage(); state.reflections=readReflectionsStorage(); state.favorites=readFavoritesStorage();state.favoriteSyncError=localStorage.getItem(LS_FAV_ERROR)||""; getOutbox(); }
+function reloadSharedState() { state.logs=readLogsStorage(); state.reflections=readReflectionsStorage(); state.favorites=readFavoritesStorage();state.favoriteSyncError=localStorage.getItem(LS_FAV_ERROR)||""; renderCurrentView(); refreshSyncState(); }
+function getOutboxKey(action,payload) { if(!payload)return null; if(action==="UPSERT_REFLECTION")return "REFL:"+payload.date; if(action==="UPSERT_FAVORITE"||action==="DELETE_FAVORITE")return "FAV:"+payload.id; if(payload.id!==undefined)return "LOG:"+payload.id; return null; }
 function enqueueInBox(source,action,payload) {
   const box=source.map(x=>({...x})), key=getOutboxKey(action,payload);
   if(key){ const idx=box.findIndex(x=>getOutboxKey(x.action,x.payload)===key); if(idx!==-1){ const prev=box[idx];
@@ -256,7 +268,7 @@ function setSyncDot(status) {
   const label=labels[status]||"동기화 상태", text=$("syncStatusText"); if(text)text.textContent=label;
   const btn=$("syncBtn"); if(btn){btn.setAttribute("aria-label",`지금 동기화. 현재 ${label}`);btn.title=`지금 동기화 · ${label}`;}
 }
-function refreshSyncState() { if(!isGasUrlSet())setSyncDot(""); else if(!navigator.onLine)setSyncDot("offline"); else setSyncDot(getOutbox().length?"pending":"ok"); }
+function refreshSyncState() { if(!isGasUrlSet())setSyncDot(""); else if(!navigator.onLine)setSyncDot("offline"); else setSyncDot((getOutbox().length+getFavoriteOutbox().length)?"pending":state.favoriteSyncError?"error":"ok"); }
 function acquireSyncLease() {
   const now=Date.now(); try{const cur=JSON.parse(localStorage.getItem(LS_SYNC_LEASE)||"null"); if(cur&&cur.owner!==TAB_ID&&Number(cur.expiresAt)>now)return false;}catch{}
   const mine={owner:TAB_ID,expiresAt:now+SYNC_LEASE_MS}; if(!safeStorageSet(LS_SYNC_LEASE,JSON.stringify(mine),true))return false;
@@ -270,7 +282,7 @@ function validateEnvelope(data,expectedStoreId) {
   if(!data||typeof data!=="object")throw new SyncError("서버 응답 형식이 올바르지 않아","BAD_RESPONSE");
   if(data.appId!==APP_ID)throw new SyncError("업무일지용 Apps Script가 아니야","WRONG_APP");
   if(Number(data.schemaVersion)!==API_SCHEMA_VERSION)throw new SyncError("앱과 Apps Script 버전이 맞지 않아","SCHEMA_MISMATCH");
-  if(!Array.isArray(data.capabilities)||REQUIRED_SERVER_CAPABILITIES.some(x=>!data.capabilities.includes(x)))throw new SyncError("Apps Script를 v8.5 버전으로 먼저 업데이트해줘","SERVER_UPDATE_REQUIRED");
+  if(!Array.isArray(data.capabilities)||REQUIRED_SERVER_CAPABILITIES.some(x=>!data.capabilities.includes(x)))throw new SyncError("Apps Script를 v8.6.1 버전으로 먼저 업데이트해줘","SERVER_UPDATE_REQUIRED");
   if(!data.storeId)throw new SyncError("시트 식별값이 없어","BAD_RESPONSE");
   if(expectedStoreId&&data.storeId!==expectedStoreId)throw new SyncError("현재 연결된 시트와 다른 시트야","WRONG_STORE");
   const serverTime=Number(data.serverTime); if(Number.isFinite(serverTime))state.clockSkewMs=Date.now()-serverTime;
@@ -327,27 +339,39 @@ function mergeServerData(data) {
   const nextRefl={...state.reflections}; for(const [k,raw] of Object.entries(data.reflections||{})){const s=normalizeReflection(raw,k);if(!s)continue;const l=nextRefl[s.date];if(!l){nextRefl[s.date]=s;continue;}const cmp=versionCompare(s,l);
     if(cmp>0){if(recordsDifferent(l,s))addRecovery("reflection",s.date,l,s);nextRefl[s.date]=s;}else if(cmp<0&&recordsDifferent(l,s)){addRecovery("reflection",s.date,s,l);} }
   const rev=Number(data.revision)||0;
-  if(!commitStorageChanges({[LS_LOGS]:JSON.stringify(nextLogs),[LS_REFL]:JSON.stringify(nextRefl),[LS_REV]:String(rev)}))throw new SyncError("서버 데이터를 기기에 저장하지 못했어","LOCAL_WRITE");
-  state.logs=nextLogs;state.reflections=nextRefl;state.serverRevision=rev;renderCurrentView();notifySharedChange();
+  if(!commitStorageChanges({[LS_LOGS]:JSON.stringify(nextLogs),[LS_REFL]:JSON.stringify(nextRefl),[LS_REV]:String(rev)}))throw new SyncError("업무·회고를 기기에 저장하지 못했어","LOCAL_WRITE");
+  state.logs=nextLogs;state.reflections=nextRefl;state.serverRevision=rev;
+  const favoritesOk=mergeFavoriteResponse(data);
+  renderCurrentView();updateDataStatus();notifySharedChange();return favoritesOk;
 }
 async function fetchAndMergeAll(forceFull=false) {
-  const rev=forceFull?0:getServerRevision(); const params=forceFull?{}:(rev>0?{sinceRev:rev}:{}); const data=await gasCall("getAll",undefined,params); mergeServerData(data); return true;
+  const rev=forceFull?0:getServerRevision();
+  const favoritesRev=forceFull||localStorage.getItem(LS_FAV_RETRY)==="1"?0:Number(localStorage.getItem(LS_FAV_REV)||0);
+  const params={sinceRev:rev,sinceFavoriteRev:favoritesRev};
+  const data=await gasCall("getAll",undefined,params);
+  return {logs:true,favorites:mergeServerData(data)};
 }
 async function syncNow(quiet=false,options={}) {
   if(syncRunning){resyncRequested=true;return false;}
-  if(!isGasUrlSet()){setSyncDot("");if(!quiet)toast("설정에서 구글 시트 연동을 먼저 해줘");return false;}
+  if(!isGasUrlSet()){setSyncDot("");if(!quiet)toast("설정"+"에서 구글 시트 연동을 먼저 해줘");return false;}
   if(!navigator.onLine){setSyncDot("offline");if(!quiet)toast("오프라인이야. 기록은 기기에 저장되고 온라인이 되면 올라가.");return false;}
   if(flushing){resyncRequested=true;return false;}
-  if(!acquireSyncLease()){setSyncDot(getOutbox().length?"pending":"ok");if(!quiet)toast("다른 창에서 동기화 중이야");return false;}
-  setSyncDot("syncing"); syncRunning=true; let flushed=false,pulled=false;
+  if(!acquireSyncLease()){refreshSyncState();if(!quiet)toast("다른 창에서 동기화 중이야");return false;}
+  setSyncDot("syncing");syncRunning=true;
+  let logsSent=false,favoritesSent=false,pulled={logs:false,favorites:false};
   try{
     try{await verifyServerCompatibility();}catch(e){lastSyncError=e&&e.message||"Apps Script 호환성 확인 실패";setSyncDot("error");if(!quiet)toast(lastSyncError);return false;}
-    flushed=await flushOutbox(); renewSyncLease();
-    try{pulled=await fetchAndMergeAll(!!options.forceFull);}catch(e){lastSyncError=e&&e.message||"동기화 실패";pulled=false;}
-    const ok=flushed&&pulled&&!getOutbox().length;
+    logsSent=await flushOutbox();renewSyncLease();
+    favoritesSent=await flushFavoriteOutbox();renewSyncLease();
+    try{pulled=await fetchAndMergeAll(!!options.forceFull);}catch(e){lastSyncError=e&&e.message||"업무·회고 수신 실패";}
+    const logsOk=logsSent&&pulled.logs&&!getOutbox().length;
+    const favoritesOk=favoritesSent&&pulled.favorites&&!getFavoriteOutbox().length;
+    if(!favoritesSent)setFavoriteError("전송 확인 필요");
+    const ok=logsOk&&favoritesOk;
     if(ok){safeStorageSet(LS_LAST_SYNC,String(Date.now()),true);setSyncDot("ok");}
     else setSyncDot(navigator.onLine?"error":"offline");
-    if(!quiet)toast(ok?"동기화 완료":lastSyncError||"일부 기록을 동기화하지 못했어");
+    updateDataStatus();
+    if(!quiet)toast(ok?"동기화 완료":logsOk?"업무·회고 동기화 완료 · 즐겨찾기 확인 필요":lastSyncError||"업무·회고 동기화 확인 필요");
     return ok;
   }finally{syncRunning=false;releaseSyncLease();if(resyncRequested){resyncRequested=false;scheduleSync();}}
 }
@@ -359,9 +383,9 @@ async function connectGas(url,token) {
     await gasCall("probe",undefined,{}, {url:u,token:t,expectedStoreId:meta.storeId});
     const oldStore=getStoreId(); let switchStore=false;
     if(oldStore&&oldStore!==meta.storeId){switchStore=confirm("기존에 연결했던 시트와 다른 시트야. 이 시트로 연결을 바꾸고 현재 기기 기록을 다시 올릴까?");if(!switchStore)return {ok:false,message:"기존 시트 연결을 유지했어."};}
-    const changes={[LS_GAS_URL]:u,[LS_GAS_TOKEN]:t,[LS_STORE_ID]:meta.storeId,[LS_REV]:"0"};
+    const changes={[LS_GAS_URL]:u,[LS_GAS_TOKEN]:t,[LS_STORE_ID]:meta.storeId,[LS_REV]:"0",[LS_FAV_REV]:"0",[LS_FAV_RETRY]:"0"};
     if(switchStore){let box=[];for(const l of state.logs){box=enqueueInBox(box,l.deleted?"DELETE_LOG":"UPDATE_LOG",l.deleted?{id:l.id,updatedAt:l.updatedAt,deviceId:l.deviceId||DEVICE_ID}:logPayload(l));}
-      for(const r of Object.values(state.reflections))box=enqueueInBox(box,"UPSERT_REFLECTION",reflectionPayload(r));changes[LS_OUTBOX]=JSON.stringify(box);}
+      for(const r of Object.values(state.reflections))box=enqueueInBox(box,"UPSERT_REFLECTION",reflectionPayload(r));let favBox=[];for(const f of state.favorites)favBox=enqueueInBox(favBox,f.deleted?"DELETE_FAVORITE":"UPSERT_FAVORITE",favoritePayload(f));changes[LS_OUTBOX]=JSON.stringify(box);changes[LS_FAV_OUTBOX]=JSON.stringify(favBox);}
     if(!commitStorageChanges(changes))return {ok:false,message:"연결 정보를 기기에 저장하지 못했어."};
     state.serverStoreId=meta.storeId; serverCapabilityVerified=true; const synced=await syncNow(true,{forceFull:true}); return {ok:synced,message:synced?"연결됨":"연결은 확인했지만 데이터 동기화에 실패했어."};
   }catch(e){return {ok:false,message:e&&e.message||"연결 실패"};}
@@ -522,6 +546,8 @@ function updateReflectionHint() {
 }
 
 function requesterOptions() {
+  const projects=[...new Set(state.logs.filter(x=>!x.deleted).map(x=>x.project).filter(Boolean))].sort();
+  $("projectList").innerHTML=projects.map(x=>`<option value="${escapeAttr(x)}"></option>`).join("");
   const names=[...new Set(state.logs.filter(x=>!x.deleted).map(x=>x.requester).filter(Boolean))].sort();
   $("requesterList").innerHTML=names.map(x=>`<option value="${escapeAttr(x)}"></option>`).join("");
 }
@@ -567,6 +593,7 @@ function requestCardHtml(x) {
   </article>`;
 }
 function renderToday() {
+  renderFavorites();
   const current=normalizeDateStr(state.currentDate),[cy,cm,cd]=current.split("-").map(Number),cdt=new Date(cy,cm-1,cd);
   $("todayDateMain").textContent=`${cm}월 ${cd}일`;$("todayDateSub").textContent=`${cy}년 · ${WEEKDAY_KR[cdt.getDay()]}요일`;
   $("reflectionTitle").textContent=state.currentDate===todayStr()?"오늘 회고":"이 날 회고";
@@ -646,13 +673,16 @@ function renderHistory(filter = $("searchInput").value || "") {
 }
 
 function renderSettings() {
-  $("gasUrlInput").value=isGasUrlSet()?getGasUrl():"";
-  $("gasTokenInput").value=getGasToken();
-  const recovery=readJsonRaw(LS_RECOVERY,[]);const last=Number(localStorage.getItem(LS_LAST_SYNC)||0);const skew=Math.abs(state.clockSkewMs);
-  $("dataStatusText").textContent=`기록 ${state.logs.filter(x=>!x.deleted).length}건 · 회고 ${Object.keys(state.reflections).length}일 · 전송 대기 ${getOutbox().length}건 · 복구본 ${Array.isArray(recovery)?recovery.length:0}건`;
+  renderFavorites();
+  if(!settingsConnectionDirty){
+    $("gasUrlInput").value=isGasUrlSet()?getGasUrl():"";
+    $("gasTokenInput").value=getGasToken();
+  }
+  updateDataStatus();const last=Number(localStorage.getItem(LS_LAST_SYNC)||0);const skew=Math.abs(state.clockSkewMs);
   const sd=$("syncDetailText");if(sd){const parts=[];parts.push(`앱 v${APP_VERSION}`);if(last)parts.push(`마지막 성공 ${new Date(last).toLocaleString("ko-KR")}`);if(getServerRevision())parts.push(`서버 revision ${getServerRevision()}`);if(skew>5*60*1000)parts.push(`기기 시계 차이 약 ${Math.round(skew/60000)}분`);sd.textContent=parts.join(" · ");}
 }
 function renderCurrentView() {
+  renderFavorites();
   if (state.currentView === "today") renderToday();
   else if (state.currentView === "summary") renderSummary();
   else if (state.currentView === "history") renderHistory();
@@ -678,6 +708,7 @@ function openEdit(id) {
   $("editContent").value=item.content;$("editOrigin").value=item.origin;$("editRequester").value=item.requester;$("editRequestedAt").value=item.requestedAt;$("editDueDate").value=item.dueDate;
   $("editProject").value=item.project;$("editMemo").value=item.memo;$("editMeeting").checked=!!item.meeting;$("editSolved").checked=!!item.solved;$("editSupport").checked=!!item.support;$("editHighlight").checked=!!item.highlight;
   $("editRequestFields").hidden=item.origin!=="request";$("editReturnPendingBtn").hidden=!(item.origin==="request"&&item.status!=="pending"&&!item.requestId&&!item.requestState);
+  requesterOptions();renderFavorites();
   history.pushState({view:state.currentView,modal:id},"",location.href);$("editModal").hidden=false;document.body.classList.add("modal-open");requestAnimationFrame(()=>$("editContent").focus());
 }
 function closeEdit(fromHistory=false) {
@@ -706,7 +737,7 @@ function saveEdit() {
 
 function downloadText(name,text,mime,bom=false){const blob=new Blob([bom?"\ufeff":"",text],{type:mime}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);}
 function downloadBackup() {
-  const data={appId:APP_ID,schemaVersion:API_SCHEMA_VERSION,appVersion:APP_VERSION,exportedAt:new Date().toISOString(),logs:state.logs,reflections:state.reflections};
+  const data={appId:APP_ID,schemaVersion:API_SCHEMA_VERSION,appVersion:APP_VERSION,exportedAt:new Date().toISOString(),logs:state.logs,reflections:state.reflections,favorites:state.favorites};
   downloadText(`업무일지_백업_${todayStr()}.json`,JSON.stringify(data,null,2),"application/json;charset=utf-8");
 }
 function downloadCsv(){
@@ -720,11 +751,15 @@ function previewAndRestoreBackup(data){
   const byId={};state.logs.forEach(x=>{byId[x.id]=x;});let add=0,update=0,errors=0;const changed=[];
   for(const raw of data.logs){const x=normalizeLog(raw);if(!x){errors++;continue;}const cur=byId[x.id];if(!cur){byId[x.id]=x;add++;changed.push({kind:"log",old:null,value:x});}else if(versionCompare(x,cur)>0){byId[x.id]=x;update++;changed.push({kind:"log",old:cur,value:x});}}
   const refl={...state.reflections};for(const [k,raw] of Object.entries(data.reflections)){const x=normalizeReflection(raw,k);if(!x){errors++;continue;}const cur=refl[x.date];if(!cur||versionCompare(x,cur)>0){refl[x.date]=x;changed.push({kind:"reflection",old:cur||null,value:x});}}
+  const favById=new Map(state.favorites.map(x=>[x.id,x]));
+  if(data.favorites!==undefined&&!Array.isArray(data.favorites))throw new Error("즐겨찾기 백업 형식이 올바르지 않아");
+  for(const raw of data.favorites||[]){const x=normalizeFavorite(raw);if(!x){errors++;continue;}const cur=favById.get(x.id);if(!cur||versionCompare(x,cur)>0){favById.set(x.id,x);changed.push({kind:"favorite",old:cur||null,value:x});}}
+  const nextFavorites=[...favById.values()];
   if(!changed.length){toast(errors?`적용할 최신 데이터가 없어. 오류 ${errors}건`:"적용할 최신 데이터가 없어");return;}
   if(!confirm(`백업을 병합할까?\n새 기록 ${add}건 · 갱신 ${update}건 · 기타 변경 ${changed.length-add-update}건 · 오류 ${errors}건`))return;
-  let box=getOutbox();for(const c of changed){if(c.kind==="log"){const x=c.value;box=enqueueInBox(box,x.deleted?"DELETE_LOG":(c.old?"UPDATE_LOG":"ADD_LOG"),x.deleted?{id:x.id,updatedAt:x.updatedAt,deviceId:x.deviceId||DEVICE_ID}:logPayload(x));}else box=enqueueInBox(box,"UPSERT_REFLECTION",reflectionPayload(c.value));}
-  const nextLogs=Object.values(byId);if(!commitStorageChanges({[LS_LOGS]:JSON.stringify(nextLogs),[LS_REFL]:JSON.stringify(refl),[LS_OUTBOX]:JSON.stringify(box)}))return;
-  state.logs=nextLogs;state.reflections=refl;renderCurrentView();scheduleSync();notifySharedChange();toast("백업을 병합했어");
+  let box=getOutbox(),favBox=getFavoriteOutbox();for(const c of changed){if(c.kind==="log"){const x=c.value;box=enqueueInBox(box,x.deleted?"DELETE_LOG":(c.old?"UPDATE_LOG":"ADD_LOG"),x.deleted?{id:x.id,updatedAt:x.updatedAt,deviceId:x.deviceId||DEVICE_ID}:logPayload(x));}else if(c.kind==="favorite")favBox=enqueueInBox(favBox,c.value.deleted?"DELETE_FAVORITE":"UPSERT_FAVORITE",favoritePayload(c.value));else box=enqueueInBox(box,"UPSERT_REFLECTION",reflectionPayload(c.value));}
+  const nextLogs=Object.values(byId);if(!commitStorageChanges({[LS_LOGS]:JSON.stringify(nextLogs),[LS_REFL]:JSON.stringify(refl),[LS_FAV]:JSON.stringify(nextFavorites),[LS_FAV_OUTBOX]:JSON.stringify(favBox),[LS_OUTBOX]:JSON.stringify(box)}))return;
+  state.logs=nextLogs;state.reflections=refl;state.favorites=nextFavorites;renderCurrentView();scheduleSync();notifySharedChange();toast("백업을 병합했어");
 }
 async function importBackupFile(file){const text=await file.text();let data;try{data=JSON.parse(text.replace(/^\ufeff/,""));}catch{throw new Error("JSON 파일을 읽지 못했어");}previewAndRestoreBackup(data);}
 function bindEvents() {
@@ -772,10 +807,11 @@ function bindEvents() {
 
   $("syncBtn").addEventListener("click",()=>syncNow(false));
   $("syncNowBtn").addEventListener("click",()=>syncNow(false));
-  $("fullResyncBtn").addEventListener("click",async()=>{if(!confirm("서버와 전체 데이터를 다시 맞출까? 로컬에만 있는 기록은 지우지 않아."))return;commitStorageChanges({[LS_REV]:"0"});await syncNow(false,{forceFull:true});renderSettings();});
+  $("fullResyncBtn").addEventListener("click",async()=>{if(!confirm("서버와 전체 데이터를 다시 맞출까? 로컬에만 있는 기록은 지우지 않아."))return;commitStorageChanges({[LS_REV]:"0",[LS_FAV_REV]:"0",[LS_FAV_RETRY]:"0"});await syncNow(false,{forceFull:true});renderSettings();});
   $("gasUrlSave").addEventListener("click",async()=>{
-    $("gasStatusText").textContent="연결 확인 중";const result=await connectGas($("gasUrlInput").value,$("gasTokenInput").value);$("gasStatusText").textContent=result.message;renderSettings();
+    $("gasStatusText").textContent="연결 확인 중";const result=await connectGas($("gasUrlInput").value,$("gasTokenInput").value);if(result.ok)settingsConnectionDirty=false;$("gasStatusText").textContent=result.message;renderSettings();
   });
+  ["gasUrlInput","gasTokenInput"].forEach(id=>$(id).addEventListener("input",()=>{settingsConnectionDirty=true;}));
   $("tokenToggle").addEventListener("click",()=>{const input=$("gasTokenInput"),show=input.type==="password";input.type=show?"text":"password";$("tokenToggle").textContent=show?"숨기기":"보기";});
 
   $("exportBackupBtn").addEventListener("click",downloadBackup);
@@ -791,7 +827,7 @@ function bindEvents() {
   window.addEventListener("online",()=>syncNow(true));
   window.addEventListener("offline",()=>setSyncDot(isGasUrlSet()?"offline":""));
   window.addEventListener("storage",e=>{
-    if([LS_LOGS,LS_REFL,LS_OUTBOX].includes(e.key))reloadSharedState();
+    if([LS_LOGS,LS_REFL,LS_FAV,LS_OUTBOX,LS_FAV_OUTBOX,LS_FAV_ERROR].includes(e.key))reloadSharedState();
     if([LS_GAS_URL,LS_GAS_TOKEN,LS_STORE_ID].includes(e.key)){serverCapabilityVerified=false;refreshSyncState();}
   });
   window.addEventListener("popstate",e=>{if(!$("editModal").hidden)closeEdit(true);const v=e.state&&e.state.view;if(v)switchView(v,false);});
@@ -805,8 +841,255 @@ function initialViewFromUrl(){const v=new URLSearchParams(location.search).get("
 function init() {
   recoverStorageJournal();DEVICE_ID=getDeviceId();loadLocal();initSharedChannel();
   document.querySelectorAll(".origin-chip,.when-chip").forEach(b=>b.setAttribute("aria-pressed",String(b.classList.contains("active"))));
-  bindEvents();renderToday();const iv=initialViewFromUrl();history.replaceState({view:iv},"",location.href);if(iv!=="today")switchView(iv,false);refreshSyncState();if(isGasUrlSet())syncNow(true);
+  bindEvents();bindFavoriteEvents();renderToday();const iv=initialViewFromUrl();history.replaceState({view:iv},"",location.href);if(iv!=="today")switchView(iv,false);refreshSyncState();if(isGasUrlSet())syncNow(true);
   if("serviceWorker" in navigator)navigator.serviceWorker.register("sw.js").catch(()=>{});
+}
+
+
+
+const LS_FAV = "worklog_favorites";
+const LS_FAV_OUTBOX = "worklog_favorites_outbox";
+const LS_FAV_REV = "worklog_favorites_revision";
+const LS_FAV_RETRY = "worklog_favorites_retry_full";
+const LS_FAV_ERROR = "worklog_favorites_sync_error";
+const LS_FAV_INVALID = "worklog_favorites_invalid";
+const LS_FAV_MIGRATED = "worklog_favorites_migrated_sources";
+const FAVORITE_LIMIT = 50;
+const FAVORITE_FIELDS = [["requesterInput","requester"],["quickProject","project"],["editRequester","requester"],["editProject","project"]];
+const favoriteUndos = new Map();
+let migratingFavorites = false;
+function isFavoriteAction(action){return action==="UPSERT_FAVORITE"||action==="DELETE_FAVORITE";}
+function normalizeFavorite(raw) {
+  if(!raw||typeof raw!=="object")return null;
+  const id=String(raw.id||"").trim(),kind=raw.kind,label=String(raw.label||"").trim();
+  const order=Number(raw.order),updatedAt=Number(raw.updatedAt);
+  if(!id||id.length>200||!["requester","project"].includes(kind)||!label||label.length>(kind==="requester"?80:120)||
+    !Number.isSafeInteger(order)||order<0||!Number.isSafeInteger(updatedAt)||updatedAt<946684800000||updatedAt>4102444800000||String(raw.deviceId||"").length>100)return null;
+  return {id,kind,label,order,deleted:boolValue(raw.deleted),updatedAt,deviceId:String(raw.deviceId||""),rev:Number(raw.rev)||0};
+}
+function readFavoritesStorage() {
+  const parsed=readJsonRaw(LS_FAV,[]);
+  if(!Array.isArray(parsed)){quarantineRaw(LS_FAV,JSON.stringify(parsed),"favorites is not array");return [];}
+  const valid=[],bad=[];
+  for(const raw of parsed){const x=normalizeFavorite(raw);if(x)valid.push(x);else bad.push(raw);}
+  if(bad.length&&preserveInvalidItems(LS_FAV,bad,"invalid favorites"))safeStorageSet(LS_FAV,JSON.stringify(valid),true);
+  return valid;
+}
+function favoritePayload(x){const n=normalizeFavorite(x);if(!n)throw new Error("즐겨찾기 값이 올바르지 않아");return {...n,deviceId:n.deviceId||DEVICE_ID};}
+// Old pages never see this queue. Migrate only validated favorite actions.
+function mergeFavoriteQueue(box,item) {
+  const incoming=normalizeFavorite(item.payload);if(!incoming)return box;
+  const action=item.action==="DELETE_FAVORITE"?"DELETE_FAVORITE":(incoming.deleted?"DELETE_FAVORITE":"UPSERT_FAVORITE");
+  incoming.deleted=action==="DELETE_FAVORITE";
+  const old=box.find(x=>x.payload.id===incoming.id);
+  if(old&&versionCompare(incoming,old.payload)<=0)return box;
+  return enqueueInBox(box,action,favoritePayload(incoming));
+}
+function migrateFavoriteQueue() {
+  if(migratingFavorites)return true;
+  migratingFavorites=true;
+  try{
+    const legacy=readJsonRaw(LS_OUTBOX,[]),stored=readJsonRaw(LS_FAV_OUTBOX,[]);
+    if(!Array.isArray(legacy)||!Array.isArray(stored))return false;
+    let box=stored.slice(),remaining=[],changed=false;
+    for(const item of legacy){
+      if(item&&isFavoriteAction(item.action)&&normalizeFavorite(item.payload)){box=mergeFavoriteQueue(box,item);changed=true;}
+      else remaining.push(item);
+    }
+    let markers=readJsonRaw(LS_FAV_MIGRATED,[]);if(!Array.isArray(markers))markers=[];
+    const done=new Set(markers);
+    for(let i=0;i<localStorage.length;i++){
+      const key=localStorage.key(i);if(!key||!key.startsWith(LS_OUTBOX+".corrupt.")||done.has(key))continue;
+      let archived;try{archived=JSON.parse(localStorage.getItem(key));}catch{continue;}
+      let items=archived&&archived.items;
+      if(!Array.isArray(items)&&archived&&typeof archived.raw==="string"){try{items=JSON.parse(archived.raw);}catch{}}
+      if(!Array.isArray(items))continue;
+      const favorites=items.filter(x=>x&&isFavoriteAction(x.action)&&normalizeFavorite(x.payload));
+      if(!favorites.length)continue;
+      for(const item of favorites)box=mergeFavoriteQueue(box,item);
+      done.add(key);changed=true;
+    }
+    if(!changed)return true;
+    return commitStorageChanges({[LS_OUTBOX]:JSON.stringify(remaining),[LS_FAV_OUTBOX]:JSON.stringify(box),[LS_FAV_MIGRATED]:JSON.stringify([...done])});
+  } finally {migratingFavorites=false;}
+}
+function getFavoriteOutbox() {
+  migrateFavoriteQueue();
+  const parsed=readJsonRaw(LS_FAV_OUTBOX,[]);
+  if(!Array.isArray(parsed)){quarantineRaw(LS_FAV_OUTBOX,JSON.stringify(parsed),"favorite outbox is not array");return [];}
+  const valid=[],bad=[];
+  for(const item of parsed){if(validOutboxItem(item)&&isFavoriteAction(item.action)&&normalizeFavorite(item.payload))valid.push(item);else bad.push(item);}
+  if(bad.length&&preserveInvalidItems(LS_FAV_OUTBOX,bad,"invalid favorite outbox"))safeStorageSet(LS_FAV_OUTBOX,JSON.stringify(valid),true);
+  return valid;
+}
+function favoriteGroups(kind) {
+  const groups=new Map();
+  const rows=state.favorites.filter(x=>!x.deleted&&x.kind===kind).sort((a,b)=>a.order-b.order||(a.label<b.label?-1:a.label>b.label?1:0)||a.id.localeCompare(b.id));
+  for(const x of rows){if(!groups.has(x.label))groups.set(x.label,[]);groups.get(x.label).push(x);}
+  return [...groups.values()];
+}
+function activeFavorites(kind){return favoriteGroups(kind).map(group=>group[0]);}
+function setFavoriteError(message){state.favoriteSyncError=message||"";safeStorageSet(LS_FAV_ERROR,state.favoriteSyncError,true);updateDataStatus();}
+function isolateInvalidFavorites(rows) {
+  let prior=readJsonRaw(LS_FAV_INVALID,[]);if(!Array.isArray(prior))prior=[];
+  const records=new Map(prior.map(x=>[JSON.stringify(x.raw),x]));
+  for(const raw of rows)records.set(JSON.stringify(raw),{raw,savedAt:Date.now()});
+  return safeStorageSet(LS_FAV_INVALID,JSON.stringify([...records.values()].slice(-100)),true);
+}
+function mergeServerFavorites(rows,local=state.favorites) {
+  const byId=new Map(local.map(x=>[x.id,x])),invalid=[];
+  for(const raw of rows||[]){
+    const x=normalizeFavorite(raw);if(!x){invalid.push(raw);continue;}
+    const old=byId.get(x.id);
+    if(!old||versionCompare(x,old)>0){if(old&&recordsDifferent(old,x))addRecovery("favorite",x.id,old,x);byId.set(x.id,x);}
+    else if(versionCompare(x,old)<0&&recordsDifferent(old,x))addRecovery("favorite",x.id,x,old);
+  }
+  return {favorites:[...byId.values()],invalid};
+}
+function mergeFavoriteResponse(data) {
+  if(data.favoritesError||!Array.isArray(data.favorites)){
+    safeStorageSet(LS_FAV_RETRY,"1",true);setFavoriteError("수신"+" 확인 필요: "+(data.favoritesError||"응답 형식 오류"));return false;
+  }
+  const merged=mergeServerFavorites(data.favorites),revision=Number(data.favoritesRevision??data.revision);
+  const bad=merged.invalid.length>0;
+  if(bad&&!isolateInvalidFavorites(merged.invalid)){setFavoriteError("손상 항목을 보관할 저장 공간이 부족해");safeStorageSet(LS_FAV_RETRY,"1",true);return false;}
+  const changes={[LS_FAV]:JSON.stringify(merged.favorites),[LS_FAV_RETRY]:bad?"1":"0",[LS_FAV_ERROR]:bad?"손상된 즐겨찾기 "+merged.invalid.length+"건 확인 필요":""};
+  if(!bad&&Number.isSafeInteger(revision)&&revision>=0)changes[LS_FAV_REV]=String(revision);
+  else if(!bad){setFavoriteError("수신 진행값 확인 필요");return false;}
+  if(!commitStorageChanges(changes)){setFavoriteError("즐겨찾기 기기 저장 실패");safeStorageSet(LS_FAV_RETRY,"1",true);return false;}
+  state.favorites=merged.favorites;state.favoriteSyncError=changes[LS_FAV_ERROR];renderFavorites();updateDataStatus();
+  return !bad;
+}
+function persistFavorites(next,changed) {
+  let box=getFavoriteOutbox();
+  for(const x of changed)box=enqueueInBox(box,x.deleted?"DELETE_FAVORITE":"UPSERT_FAVORITE",favoritePayload(x));
+  if(!commitStorageChanges({[LS_FAV]:JSON.stringify(next),[LS_FAV_OUTBOX]:JSON.stringify(box)}))return false;
+  state.favorites=next;renderFavorites();updateDataStatus();scheduleSync();notifySharedChange();return true;
+}
+function saveFavorite(kind,label,id=null) {
+  label=String(label||"").trim();
+  if(!["requester","project"].includes(kind)||!label||label.length>(kind==="requester"?80:120)){toast("이름을 확인해줘"+". 요청자는 80자, 프로젝트는 120자까지야.");return false;}
+  const active=activeFavorites(kind),old=state.favorites.find(x=>x.id===id&&!x.deleted);
+  const group=old?state.favorites.filter(x=>!x.deleted&&x.kind===kind&&x.label===old.label):[];
+  if(active.some(x=>x.label===label&&(!old||x.label!==old.label))){toast("이미 등록된 이름이야");return false;}
+  if(!old&&active.length>=FAVORITE_LIMIT){toast("새 이름은 종류별 50개까지 등록할 수 있어");return false;}
+  const changed=(old?group:[{id:"fav-"+uid(),order:active.reduce((m,x)=>Math.max(m,x.order),0)+100}])
+    .map(x=>normalizeFavorite({...x,kind,label,deleted:false,updatedAt:mutationTimestamp(x.updatedAt),deviceId:DEVICE_ID}));
+  if(changed.some(x=>!x))return false;
+  const byId=new Map(changed.map(x=>[x.id,x]));
+  const next=old?state.favorites.map(x=>byId.get(x.id)||x):[...state.favorites,...changed];
+  if(!persistFavorites(next,changed))return false;toast("즐겨찾기에 저장했어");return true;
+}
+function renderFavoriteUndos() {
+  const host=$("favoriteUndoArea");if(!host)return;
+  const focused=document.activeElement,focusId=focused&&focused.dataset&&focused.dataset.favUndo;
+  host.innerHTML=[...favoriteUndos.entries()].map(([key,value])=>`<div class="favorite-undo-row"><span>${escapeHtml(value.label)} 삭제됨</span><button type="button" data-fav-undo="${escapeAttr(key)}">실행 취소</button></div>`).join("");
+  host.hidden=favoriteUndos.size===0;
+  if(focusId){const button=[...host.querySelectorAll("[data-fav-undo]")].find(x=>x.dataset.favUndo===focusId);button&&button.focus();}
+}
+function deleteFavorite(id) {
+  const old=state.favorites.find(x=>x.id===id&&!x.deleted);if(!old||!confirm("즐겨찾기에서 삭제할까? 기존 업무 기록은 그대로 남아."))return;
+  const group=state.favorites.filter(x=>!x.deleted&&x.kind===old.kind&&x.label===old.label);
+  const changed=group.map(x=>({...x,deleted:true,updatedAt:mutationTimestamp(x.updatedAt),deviceId:DEVICE_ID}));
+  const byId=new Map(changed.map(x=>[x.id,x]));
+  if(!persistFavorites(state.favorites.map(x=>byId.get(x.id)||x),changed))return;
+  const key=qid(),undo={label:old.label,deleted:changed,expiresAt:Date.now()+5000};
+  favoriteUndos.set(key,undo);renderFavoriteUndos();
+  setTimeout(()=>{favoriteUndos.delete(key);renderFavoriteUndos();},5000);
+}
+function undoFavoriteDelete(key) {
+  const undo=favoriteUndos.get(key);if(!undo)return;
+  if(Date.now()>=undo.expiresAt){favoriteUndos.delete(key);renderFavoriteUndos();return;}
+  const changed=[];
+  for(const deleted of undo.deleted){
+    const current=state.favorites.find(x=>x.id===deleted.id);
+    // Do not overwrite edits/deletions received from another device since this action.
+    if(current&&current.deleted&&versionCompare(current,deleted)===0)changed.push({...current,deleted:false,updatedAt:mutationTimestamp(current.updatedAt),deviceId:DEVICE_ID});
+  }
+  if(!changed.length){favoriteUndos.delete(key);renderFavoriteUndos();toast("다른 기기에서 변경된 항목이야");return;}
+  const byId=new Map(changed.map(x=>[x.id,x]));
+  if(!persistFavorites(state.favorites.map(x=>byId.get(x.id)||x),changed))return;
+  favoriteUndos.delete(key);renderFavoriteUndos();toast("삭제를 취소했어");
+}
+function moveFavorite(id,direction) {
+  const old=state.favorites.find(x=>x.id===id&&!x.deleted);if(!old)return;
+  const groups=favoriteGroups(old.kind),i=groups.findIndex(xs=>xs.some(x=>x.id===id)),j=i+direction;if(j<0||j>=groups.length)return;
+  [groups[i],groups[j]]=[groups[j],groups[i]];
+  const changed=groups.flatMap((xs,index)=>xs.filter(x=>x.order!==(index+1)*100).map(x=>({...x,order:(index+1)*100,updatedAt:mutationTimestamp(x.updatedAt),deviceId:DEVICE_ID})));
+  const byId=new Map(changed.map(x=>[x.id,x]));persistFavorites(state.favorites.map(x=>byId.get(x.id)||x),changed);
+}
+function cleanDuplicateFavorites(kind) {
+  const groups=favoriteGroups(kind).filter(xs=>xs.length>1);if(!groups.length)return;
+  if(!confirm("같은 이름"+"의 중복 항목을 정리할까? 입력용 이름은 하나씩 유지하고 업무 기록은 그대로 남아."))return;
+  const changed=groups.flatMap(xs=>xs.slice(1).map(x=>({...x,deleted:true,updatedAt:mutationTimestamp(x.updatedAt),deviceId:DEVICE_ID})));
+  const byId=new Map(changed.map(x=>[x.id,x]));
+  if(persistFavorites(state.favorites.map(x=>byId.get(x.id)||x),changed))toast("중복을 정리했어");
+}
+function renderFavoriteHost(host,html) {
+  if(host.innerHTML===html)return;
+  const scroll=host.scrollLeft,focused=document.activeElement;
+  const action=focused&&host.contains(focused)?{...focused.dataset}:null;
+  host.innerHTML=html;host.scrollLeft=scroll;
+  if(action){
+    const buttons=[...host.querySelectorAll("button")];
+    const target=buttons.find(x=>!x.disabled&&Object.entries(action).every(([key,value])=>x.dataset[key]===value))||
+      (action.favMove&&buttons.find(x=>!x.disabled&&(x.dataset.favMove===action.favMove||x.dataset.favEdit===action.favMove)));
+    if(target)target.focus({preventScroll:true});
+    else {host.tabIndex=-1;host.focus({preventScroll:true});}
+  }
+}
+function renderFavorites() {
+  for(const [inputId,kind] of FAVORITE_FIELDS){
+    const input=$(inputId),host=$(inputId+"Favorites"),add=$(inputId+"FavoriteAdd");if(!input||!host||!add)continue;
+    const active=activeFavorites(kind),value=input.value.trim();
+    renderFavoriteHost(host,active.map(x=>`<button type="button" class="favorite-chip${value===x.label?" active":""}" aria-pressed="${value===x.label}" data-fav-use="${escapeAttr(x.id)}" data-fav-target="${inputId}">${escapeHtml(x.label)}</button>`).join(""));
+    add.disabled=!value||value.length>(kind==="requester"?80:120)||active.some(x=>x.label===value)||active.length>=FAVORITE_LIMIT;
+    add.textContent=active.some(x=>x.label===value)?"등록됨":"+ 저장";
+  }
+  for(const kind of ["requester","project"]){
+    const host=$(kind+"FavoriteList");if(!host)continue;const groups=favoriteGroups(kind),duplicates=groups.reduce((n,xs)=>n+xs.length-1,0);
+    renderFavoriteHost(host,(groups.length>FAVORITE_LIMIT?`<p class="setting-help">병합된 이름 ${groups.length}개를 유지하고 있어. 새 등록은 50개 미만일 때 가능해.</p>`:"")+
+      (duplicates?`<p class="setting-help">중복 ${duplicates}개가 있어. 이름은 하나씩 표시해.</p><button type="button" class="secondary-btn" data-fav-clean="${kind}">중복 정리</button>`:"")+
+      (groups.length?groups.map((xs,i)=>{const x=xs[0];return `<div class="favorite-row"><span>${escapeHtml(x.label)}${xs.length>1?` <small>(중복 ${xs.length})</small>`:""}</span><div>
+        <button type="button" data-fav-move="${escapeAttr(x.id)}" data-direction="-1" aria-label="${escapeAttr(x.label)} 위로" ${i===0?"disabled":""}>↑</button>
+        <button type="button" data-fav-move="${escapeAttr(x.id)}" data-direction="1" aria-label="${escapeAttr(x.label)} 아래로" ${i===groups.length-1?"disabled":""}>↓</button>
+        <button type="button" data-fav-edit="${escapeAttr(x.id)}">수정</button><button type="button" data-fav-delete="${escapeAttr(x.id)}">삭제</button></div></div>`;}).join(""):'<p class="setting-help">등록된 즐겨찾기가 없어.</p>'));
+    const add=document.querySelector('[data-fav-add="'+kind+'"]');if(add)add.disabled=groups.length>=FAVORITE_LIMIT;
+  }
+}
+function updateDataStatus() {
+  const el=$("dataStatusText");if(!el)return;
+  const recovery=readJsonRaw(LS_RECOVERY,[]),logs=getOutbox().length,favorites=getFavoriteOutbox().length;
+  el.textContent=`기록 ${state.logs.filter(x=>!x.deleted).length}건 · 회고 ${Object.keys(state.reflections).length}일 · 전송 대기 ${logs+favorites}건 (업무·회고 ${logs} / 즐겨찾기 ${favorites}) · 복구본 ${Array.isArray(recovery)?recovery.length:0}건`;
+  const status=$("favoriteSyncStatus");
+  if(status)status.textContent=state.favoriteSyncError?"즐겨찾기 "+state.favoriteSyncError:favorites?"즐겨찾기 "+favorites+"건 전송 대기":"즐겨찾기 전송 대기 없음";
+}
+async function flushFavoriteOutbox() {
+  let failed=false;
+  for(const item of getFavoriteOutbox()){
+    renewSyncLease();inFlightQids.add(item.qid);
+    try{
+      await gasCall(item.action,item.payload);
+      const current=getFavoriteOutbox(),next=current.filter(x=>x.qid!==item.qid);
+      if(next.length!==current.length&&!commitStorageChanges({[LS_FAV_OUTBOX]:JSON.stringify(next)}))throw new Error("즐겨찾기 전송 결과 저장 실패");
+    }catch(e){failed=true;setFavoriteError("전송 확인 필요: "+(e&&e.message||"오류"));}
+    finally{inFlightQids.delete(item.qid);}
+  }
+  updateDataStatus();return !failed;
+}
+function bindFavoriteEvents(){
+  FAVORITE_FIELDS.forEach(([id])=>$(id).addEventListener("input",renderFavorites));
+  document.addEventListener("click",e=>{
+    const undo=e.target.closest("[data-fav-undo]");if(undo){undoFavoriteDelete(undo.dataset.favUndo);return;}
+    const use=e.target.closest("[data-fav-use]");
+    if(use){const x=state.favorites.find(x=>x.id===use.dataset.favUse&&!x.deleted);if(x){$(use.dataset.favTarget).value=x.label;renderFavorites();}return;}
+    const quick=e.target.closest("[data-fav-quick]");if(quick){saveFavorite(quick.dataset.favKind,$(quick.dataset.favQuick).value);return;}
+    const add=e.target.closest("[data-fav-add]");if(add){const label=prompt(add.dataset.favAdd==="requester"?"요청자 이름":"프로젝트 이름");if(label!==null)saveFavorite(add.dataset.favAdd,label);return;}
+    const edit=e.target.closest("[data-fav-edit]");if(edit){const x=state.favorites.find(x=>x.id===edit.dataset.favEdit&&!x.deleted);if(x){const label=prompt("즐겨찾기 이름 수정",x.label);if(label!==null)saveFavorite(x.kind,label,x.id);}return;}
+    const del=e.target.closest("[data-fav-delete]");if(del){deleteFavorite(del.dataset.favDelete);return;}
+    const clean=e.target.closest("[data-fav-clean]");if(clean){cleanDuplicateFavorites(clean.dataset.favClean);return;}
+    const move=e.target.closest("[data-fav-move]");if(move)moveFavorite(move.dataset.favMove,Number(move.dataset.direction));
+  });
 }
 
 init();
