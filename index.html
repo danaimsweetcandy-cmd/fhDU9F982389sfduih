@@ -34,7 +34,7 @@
       </header>
 
       <section class="quick-add" aria-label="빠른 기록">
-        <div class="add-row">
+        <div class="add-row" id="quickAddRow">
           <input id="quickContent" class="content-input" type="text" maxlength="500" autocomplete="off" enterkeyhint="done" placeholder="무슨 일을 했어?" aria-label="업무명">
           <button id="quickAddBtn" class="add-btn" type="button">저장</button>
         </div>
@@ -66,6 +66,7 @@
             <input id="requestDueDate" type="date" aria-label="요청 예정일" hidden>
           </div>
           <p class="microcopy">요청받은 시각은 자동으로 남고, 시작한 뒤에는 날짜별 작업 기록을 이어서 남길 수 있어.</p>
+          <button id="batchToggle" type="button" class="batch-toggle">+ 여러 업무 한꺼번에 추가</button>
         </div>
 
         <details class="extra-details">
@@ -75,6 +76,14 @@
             <input id="quickMemo" type="text" maxlength="500" autocomplete="off" placeholder="메모 (선택)" aria-label="메모">
           </div>
         </details>
+        <section id="batchPanel" class="batch-panel" aria-label="여러 요청 업무 입력" hidden>
+          <div class="batch-heading"><strong>여러 업무 추가</strong><span id="batchCount" class="batch-count">0건 / 최대 20건</span></div>
+          <p class="batch-help">요청자·프로젝트·메모·태그는 모든 업무에 공통 적용돼. 일괄 등록한 업무는 각각 대기로 저장돼.</p>
+          <div id="batchRows" class="batch-rows"></div>
+          <button id="batchAddRowBtn" type="button" class="batch-add-row">+ 업무 추가</button>
+          <p class="batch-help">여러 줄을 붙여넣으면 업무별로 나뉘어 입력돼. 개별 예정일은 각 업무에서 변경할 수 있어.</p>
+          <div class="batch-actions"><button id="batchCancelBtn" type="button" class="secondary-btn">취소</button><button id="batchSaveBtn" type="button" class="primary-btn" disabled>0건 한꺼번에 저장</button></div>
+        </section>
       </section>
 
       <section id="pendingSection" class="pending-section" hidden>

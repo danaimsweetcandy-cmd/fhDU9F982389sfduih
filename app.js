@@ -1,9 +1,9 @@
 // ============================================================
-// 업무일지 PWA v8.6.1
+// 업무일지 PWA v8.7.0
 // 기록은 가볍게, 여러 날 이어지는 요청도 날짜별로 남기는 출시 후보
 // ============================================================
 const CONFIG = { GAS_URL: "PUT_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE" };
-const APP_VERSION = "8.6.1";
+const APP_VERSION = "8.7.0";
 const APP_ID = "dayeon-worklog";
 const API_SCHEMA_VERSION = 3;
 const REQUIRED_SERVER_CAPABILITIES = ["contextFlagsV1","requestWorkflowV1","favoritesV1","favoritesSyncV2"];
@@ -11,6 +11,9 @@ const REQUIRED_SERVER_CAPABILITIES = ["contextFlagsV1","requestWorkflowV1","favo
 const LS_LOGS = "worklog_logs";
 const LS_REFL = "worklog_reflections";
 const LS_OUTBOX = "worklog_outbox";
+const LS_BATCH_DRAFT = "worklog_batch_request_draft";
+const BATCH_LIMIT = 20;
+const BATCH_DRAFT_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 const LS_GAS_URL = "worklog_gas_url";
 const LS_GAS_TOKEN = "worklog_gas_token";
 const LS_DEVICE_ID = "worklog_device_id";
@@ -55,6 +58,12 @@ let lastMutationAt = 0;
 let sharedChannel = null;
 let serverCapabilityVerified = false;
 let settingsConnectionDirty = false;
+let batchRequestMode = false;
+let batchRequestRows = [];
+let batchOriginalQuickContent = "";
+let batchSubmitting = false;
+let batchOriginalRequestWhen = "now";
+let batchDraftStorageWarned = false;
 
 function $(id) { return document.getElementById(id); }
 function uid() {
@@ -241,10 +250,10 @@ function enqueueInBox(source,action,payload) {
   box.push({action,payload,queuedAt:Date.now(),qid:qid()}); return box;
 }
 function notifySharedChange() { try{sharedChannel&&sharedChannel.postMessage({type:"data-changed",from:TAB_ID});}catch{} }
-function persistLogsAndQueueActions(nextLogs,actions) {
+function persistLogsAndQueueActions(nextLogs,actions,extraChanges={}) {
   let nextBox=getOutbox();
   for(const a of actions||[])nextBox=enqueueInBox(nextBox,a.action,a.payload);
-  if(!commitStorageChanges({[LS_LOGS]:JSON.stringify(nextLogs),[LS_OUTBOX]:JSON.stringify(nextBox)}))return false;
+  if(!commitStorageChanges({[LS_LOGS]:JSON.stringify(nextLogs),[LS_OUTBOX]:JSON.stringify(nextBox),...extraChanges}))return false;
   state.logs=nextLogs;scheduleSync();notifySharedChange();return true;
 }
 function persistLogAndQueue(nextLogs,action,payload) {
@@ -419,6 +428,181 @@ function resetQuickMeta() {
   $("quickProject").value = "";
   $("quickMemo").value = "";
   const d = document.querySelector(".extra-details"); if (d) d.open = false;
+}
+// v8.7.0: only the request quick-entry has an optional multi-item draft.
+// The normal single-entry path and server schema remain unchanged.
+function newBatchRow(content="",dueDate="") {
+  return {id:uid(),content:String(content||"").slice(0,500),dueDate:normalizeDateStr(dueDate)};
+}
+function batchDraftData() {
+  return {version:1,savedAt:Date.now(),originalQuickContent:batchOriginalQuickContent,
+    originalRequestWhen:batchOriginalRequestWhen,
+    rows:batchRequestRows.map(x=>({...x})),requester:$("requesterInput").value,
+    requestWhen:state.requestWhen,requestDueDate:$("requestDueDate").value,
+    project:$("quickProject").value,memo:$("quickMemo").value,
+    meeting:$("quickMeeting").checked,solved:$("quickSolved").checked,support:$("quickSupport").checked};
+}
+function saveBatchDraft() {
+  if(!batchRequestMode||batchSubmitting)return;
+  if(!safeStorageSet(LS_BATCH_DRAFT,JSON.stringify(batchDraftData()),true)){
+    if(!batchDraftStorageWarned)toast("임시 저장이 안 돼. 저장 공간을 확인해줘");
+    batchDraftStorageWarned=true;
+  }else batchDraftStorageWarned=false;
+}
+function discardBatchDraft() {
+  try{localStorage.removeItem(LS_BATCH_DRAFT);}catch{}
+}
+function updateBatchCount() {
+  const count=batchRequestRows.filter(x=>x.content.trim()).length;
+  $("batchCount").textContent=`${count}건 / 최대 ${BATCH_LIMIT}건`;
+  $("batchSaveBtn").textContent=`${count}건 한꺼번에 저장`;
+  $("batchSaveBtn").disabled=count===0||batchSubmitting;
+  $("batchAddRowBtn").disabled=batchRequestRows.length>=BATCH_LIMIT;
+}
+function renderBatchRows(focusId="") {
+  $("batchRows").innerHTML=batchRequestRows.map((x,i)=>`<div class="batch-item" data-batch-id="${escapeAttr(x.id)}">
+    <div class="batch-item-main"><span class="batch-item-number">${i+1}</span>
+      <input class="batch-content" data-batch-field="content" value="${escapeAttr(x.content)}" maxlength="500" type="text" autocomplete="off" enterkeyhint="next" aria-label="${i+1}번째 업무명" placeholder="업무명 입력">
+      <button class="batch-remove" type="button" data-batch-remove="${escapeAttr(x.id)}" aria-label="${i+1}번째 업무 삭제">×</button>
+    </div>
+    <details class="batch-due" ${x.dueDate?"open":""}>
+      <summary>개별 예정일${x.dueDate?" · "+escapeHtml(formatShortDate(x.dueDate)):" 변경"}</summary>
+      <div class="batch-due-inner"><input data-batch-field="dueDate" type="date" value="${escapeAttr(x.dueDate)}" aria-label="${i+1}번째 개별 예정일">
+      <button type="button" class="batch-due-clear" data-batch-clear="${escapeAttr(x.id)}">공통일 사용</button></div>
+    </details>
+  </div>`).join("");
+  updateBatchCount();
+  if(focusId){const row=[...$("batchRows").querySelectorAll("[data-batch-id]")].find(x=>x.dataset.batchId===focusId);
+    row?.querySelector(".batch-content")?.focus({preventScroll:true});}
+}
+function updateRequestWhenButtons() {
+  document.querySelectorAll(".when-chip").forEach(b=>{
+    const on=b.dataset.when===state.requestWhen;
+    b.classList.toggle("active",on);b.setAttribute("aria-pressed",String(on));
+  });
+  $("requestDueDate").hidden=state.requestWhen!=="date";
+}
+function showBatchMode() {
+  document.querySelector('.when-chip[data-when="now"]').hidden=batchRequestMode;
+  $("batchPanel").hidden=!batchRequestMode;
+  $("batchToggle").hidden=batchRequestMode;
+  $("quickAddRow").hidden=batchRequestMode;
+  if(batchRequestMode)renderBatchRows();
+}
+function openBatchMode() {
+  if(batchRequestMode||state.activeOrigin!=="request")return;
+  batchOriginalQuickContent=$("quickContent").value;
+  batchOriginalRequestWhen=state.requestWhen;
+  if(state.requestWhen==="now"){state.requestWhen="today";updateRequestWhenButtons();}
+  batchRequestRows=[newBatchRow(batchOriginalQuickContent)];
+  batchRequestMode=true;showBatchMode();saveBatchDraft();
+  $("batchRows").querySelector(".batch-content")?.focus({preventScroll:true});
+}
+function closeBatchMode(restoreOriginal=true) {
+  if(!batchRequestMode)return;
+  batchRequestMode=false;batchRequestRows=[];batchSubmitting=false;
+  if(restoreOriginal)$("quickContent").value=batchOriginalQuickContent;
+  state.requestWhen=batchOriginalRequestWhen;
+  updateRequestWhenButtons();
+  batchOriginalQuickContent="";batchOriginalRequestWhen="now";
+  discardBatchDraft();showBatchMode();
+}
+function restoreBatchDraft() {
+  const draft=readJsonRaw(LS_BATCH_DRAFT,null);
+  if(!draft)return false;
+  if(draft.version!==1||!Array.isArray(draft.rows)||draft.rows.length<1||draft.rows.length>BATCH_LIMIT||
+      !Number.isFinite(Number(draft.savedAt))||Date.now()-Number(draft.savedAt)>BATCH_DRAFT_KEEP_MS){
+    discardBatchDraft();return false;
+  }
+  const seen=new Set(),rows=[];
+  for(const raw of draft.rows){
+    if(!raw||typeof raw.id!=="string"||!raw.id||raw.id.length>200||seen.has(raw.id)||
+        typeof raw.content!=="string"||raw.content.length>500||
+        (raw.dueDate&&!normalizeDateStr(raw.dueDate))){discardBatchDraft();return false;}
+    seen.add(raw.id);
+    if(state.logs.some(x=>x.id===raw.id)){continue;}
+    rows.push({id:raw.id,content:raw.content,dueDate:normalizeDateStr(raw.dueDate)});
+  }
+  if(!rows.length){discardBatchDraft();return false;}
+  batchOriginalQuickContent=String(draft.originalQuickContent||"").slice(0,500);
+  batchOriginalRequestWhen=["now","today","tomorrow","date"].includes(draft.originalRequestWhen)?draft.originalRequestWhen:"now";
+  $("quickContent").value=batchOriginalQuickContent;
+  batchRequestRows=rows;
+  state.activeOrigin="request";
+  state.requestWhen=["today","tomorrow","date"].includes(draft.requestWhen)?draft.requestWhen:"today";
+  document.querySelectorAll(".origin-chip").forEach(b=>{const on=b.dataset.origin==="request";b.classList.toggle("active",on);b.setAttribute("aria-pressed",String(on));});
+  updateRequestWhenButtons();
+  $("requestFields").hidden=false;
+  $("requesterInput").value=String(draft.requester||"").slice(0,80);
+  $("requestDueDate").value=normalizeDateStr(draft.requestDueDate)||addDays(todayStr(),1);
+  $("quickProject").value=String(draft.project||"").slice(0,120);
+  $("quickMemo").value=String(draft.memo||"").slice(0,500);
+  $("quickMeeting").checked=!!draft.meeting;$("quickSolved").checked=!!draft.solved;$("quickSupport").checked=!!draft.support;
+  const extra=document.querySelector(".extra-details");if(extra&&(draft.project||draft.memo))extra.open=true;
+  batchRequestMode=true;showBatchMode();toast("작성 중이던 여러 업무를 복구했어");return true;
+}
+function batchBaseDueDate() {
+  if(state.requestWhen==="date")return normalizeDateStr($("requestDueDate").value);
+  return requestDueDate();
+}
+function appendBatchRow() {
+  if(!batchRequestMode||batchRequestRows.length>=BATCH_LIMIT){toast(`최대 ${BATCH_LIMIT}건까지 추가할 수 있어`);return;}
+  const row=newBatchRow();batchRequestRows.push(row);renderBatchRows(row.id);saveBatchDraft();
+}
+function pasteBatchLines(event) {
+  if(!batchRequestMode)return;
+  const text=event.clipboardData?.getData("text/plain")||"";
+  if(!/[\r\n]/.test(text))return;
+  event.preventDefault();
+  const input=event.target, host=input.closest("[data-batch-id]");if(!host)return;
+  const index=batchRequestRows.findIndex(x=>x.id===host.dataset.batchId);if(index<0)return;
+  const lines=text.split(/\r?\n|\r/g).map(x=>x.trim()).filter(Boolean);
+  if(!lines.length)return;
+  const before=input.value.slice(0,input.selectionStart??input.value.length),after=input.value.slice(input.selectionEnd??input.value.length);
+  const contents=lines.map((line,i)=>(i===0?before:"")+line+(i===lines.length-1?after:""));
+  if(contents.some(x=>x.length>500)){toast("각 업무명은 최대 500자까지 입력할 수 있어");return;}
+  if(batchRequestRows.length+contents.length-1>BATCH_LIMIT){toast(`일괄 입력은 최대 ${BATCH_LIMIT}건까지야`);return;}
+  const original=batchRequestRows[index];
+  batchRequestRows.splice(index,1,{...original,content:contents[0]},...contents.slice(1).map(x=>newBatchRow(x)));
+  renderBatchRows();saveBatchDraft();
+}
+function batchRequestSave() {
+  if(!batchRequestMode||batchSubmitting||state.activeOrigin!=="request")return;
+  const rows=batchRequestRows.filter(x=>x.content.trim());
+  if(!rows.length){toast("업무명을 입력해줘");return;}
+  if(rows.length>BATCH_LIMIT||rows.some(x=>x.content.trim().length>500)){toast("업무명과 건수를 확인해줘");return;}
+  const dueDate=batchBaseDueDate();if(!dueDate){toast("공통 예정일을 확인해줘");return;}
+  const names=rows.map(x=>x.content.trim());
+  if(new Set(names).size!==names.length&&!confirm("같은 업무명이 여러 건 있어. 각각 별도 요청으로 추가할까?"))return;
+  batchSubmitting=true;updateBatchCount();
+  try{
+    const now=new Date(),requestedAt=nowLocalDateTime(now),time=nowTimeStr(now);
+    const requester=$("requesterInput").value.trim(),project=$("quickProject").value.trim(),memo=$("quickMemo").value.trim();
+    const meeting=$("quickMeeting").checked,solved=$("quickSolved").checked,support=$("quickSupport").checked;
+    const existing=readLogsStorage(),existingById=new Map(existing.map(x=>[x.id,x]));
+    const next=existing.slice(),actions=[];
+    for(const row of rows){
+      if(existingById.has(row.id)){toast("이미 저장된 항목이 있어. 데이터를 확인한 뒤 다시 시도해줘");return;}
+      const individualDue=row.dueDate||dueDate;
+      if(!normalizeDateStr(individualDue)){toast("개별 예정일을 확인해줘");return;}
+      const root=normalizeLog({id:row.id,date:individualDue,time,cat:"업무",content:row.content.trim(),origin:"request",
+        requester,requestedAt,dueDate:individualDue,project,memo,meeting,solved,support,highlight:false,
+        status:"pending",actualStartedAt:"",requestId:"",requestState:"waiting",completedAt:"",
+        updatedAt:mutationTimestamp(),deleted:false,deviceId:DEVICE_ID});
+      if(!root){toast("업무 정보를 확인해줘");return;}
+      const payload=logPayload(root);
+      // Validate each GET payload before committing any of the group locally.
+      const offlineBase="https://script.google.com/macros/s/"+"x".repeat(350)+"/exec";
+      try{buildGasUrl("ADD_LOG",payload,{},isGasUrlSet()?getGasUrl():offlineBase,getGasToken());}
+      catch(e){toast(`${actions.length+1}번째 업무: ${e.message||"전송 길이를 확인해줘"}`);return;}
+      next.push(root);actions.push({action:"ADD_LOG",payload});
+    }
+    if(!persistLogsAndQueueActions(next,actions,{[LS_BATCH_DRAFT]:"null"}))return;
+    const count=rows.length;
+    batchRequestMode=false;batchRequestRows=[];batchOriginalQuickContent="";batchOriginalRequestWhen="now";
+    $("quickContent").value="";resetQuickMeta();showBatchMode();renderToday();updateDataStatus();
+    toast(`${count}건 기기에 저장했어 · 서버 동기화는 별도 진행돼`);
+  }finally{batchSubmitting=false;if(batchRequestMode)updateBatchCount();}
 }
 function requestWorkId(rootId,date) {
   const raw=String(rootId||"");let h=2166136261;for(let i=0;i<raw.length;i++){h^=raw.charCodeAt(i);h=Math.imul(h,16777619)>>>0;}
@@ -764,14 +948,58 @@ function previewAndRestoreBackup(data){
 async function importBackupFile(file){const text=await file.text();let data;try{data=JSON.parse(text.replace(/^\ufeff/,""));}catch{throw new Error("JSON 파일을 읽지 못했어");}previewAndRestoreBackup(data);}
 function bindEvents() {
   document.querySelectorAll(".origin-chip").forEach(b=>b.addEventListener("click",()=>{
+    if(batchRequestMode&&b.dataset.origin!=="request"){
+      if(!confirm("작성 중인 여러 업무를 취소하고 입력 방식을 바꿀까?"))return;
+      closeBatchMode(true);
+    }
     state.activeOrigin=b.dataset.origin;document.querySelectorAll(".origin-chip").forEach(x=>{const on=x===b;x.classList.toggle("active",on);x.setAttribute("aria-pressed",String(on));});
     $("requestFields").hidden=state.activeOrigin!=="request";
   }));
   document.querySelectorAll(".when-chip").forEach(b=>b.addEventListener("click",()=>{
     state.requestWhen=b.dataset.when;document.querySelectorAll(".when-chip").forEach(x=>{const on=x===b;x.classList.toggle("active",on);x.setAttribute("aria-pressed",String(on));});
     $("requestDueDate").hidden=state.requestWhen!=="date";if(state.requestWhen==="date"&&!$("requestDueDate").value)$("requestDueDate").value=addDays(todayStr(),1);
+    saveBatchDraft();
   }));
   $("quickAddBtn").addEventListener("click",addQuickLog);
+  $("batchToggle").addEventListener("click",openBatchMode);
+  $("batchCancelBtn").addEventListener("click",()=>closeBatchMode(true));
+  $("batchAddRowBtn").addEventListener("click",appendBatchRow);
+  $("batchSaveBtn").addEventListener("click",batchRequestSave);
+  $("batchRows").addEventListener("input",e=>{
+    const host=e.target.closest("[data-batch-id]");if(!host)return;
+    const row=batchRequestRows.find(x=>x.id===host.dataset.batchId);if(!row)return;
+    if(e.target.dataset.batchField==="content"){row.content=e.target.value;updateBatchCount();}
+    if(e.target.dataset.batchField==="dueDate")row.dueDate=normalizeDateStr(e.target.value);
+    saveBatchDraft();
+  });
+  $("batchRows").addEventListener("change",e=>{
+    if(e.target.dataset.batchField==="dueDate")renderBatchRows();
+  });
+  $("batchRows").addEventListener("paste",e=>{
+    if(e.target.dataset.batchField==="content")pasteBatchLines(e);
+  });
+  $("batchRows").addEventListener("keydown",e=>{
+    if(e.target.dataset.batchField!=="content"||e.key!=="Enter"||e.isComposing)return;
+    e.preventDefault();const host=e.target.closest("[data-batch-id]");
+    const i=batchRequestRows.findIndex(x=>x.id===host?.dataset.batchId);
+    if(i===batchRequestRows.length-1)appendBatchRow();
+    else if(i>=0){const next=[...$("batchRows").querySelectorAll(".batch-content")][i+1];next?.focus();}
+  });
+  $("batchRows").addEventListener("click",e=>{
+    const remove=e.target.closest("[data-batch-remove]");
+    if(remove){const i=batchRequestRows.findIndex(x=>x.id===remove.dataset.batchRemove);if(i<0)return;
+      if(batchRequestRows.length===1)batchRequestRows=[newBatchRow()];else batchRequestRows.splice(i,1);
+      renderBatchRows();saveBatchDraft();return;
+    }
+    const clear=e.target.closest("[data-batch-clear]");
+    if(clear){const row=batchRequestRows.find(x=>x.id===clear.dataset.batchClear);if(!row)return;
+      row.dueDate="";renderBatchRows();saveBatchDraft();}
+  });
+  ["requesterInput","requestDueDate","quickProject","quickMemo","quickMeeting","quickSolved","quickSupport"].forEach(id=>
+    $(id).addEventListener("input",saveBatchDraft));
+  $("batchPanel").addEventListener("keydown",e=>{if(e.key==="Escape"){
+    e.preventDefault();if(confirm("작성 중인 여러 업무를 취소할까?"))closeBatchMode(true);
+  }});
   $("quickContent").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.isComposing){e.preventDefault();addQuickLog();}});
 
   $("prevDay").addEventListener("click",()=>{state.currentDate=addDays(state.currentDate,-1);state.followToday=false;renderToday();});
@@ -841,7 +1069,7 @@ function initialViewFromUrl(){const v=new URLSearchParams(location.search).get("
 function init() {
   recoverStorageJournal();DEVICE_ID=getDeviceId();loadLocal();initSharedChannel();
   document.querySelectorAll(".origin-chip,.when-chip").forEach(b=>b.setAttribute("aria-pressed",String(b.classList.contains("active"))));
-  bindEvents();bindFavoriteEvents();renderToday();const iv=initialViewFromUrl();history.replaceState({view:iv},"",location.href);if(iv!=="today")switchView(iv,false);refreshSyncState();if(isGasUrlSet())syncNow(true);
+  bindEvents();bindFavoriteEvents();restoreBatchDraft();renderToday();const iv=initialViewFromUrl();history.replaceState({view:iv},"",location.href);if(iv!=="today")switchView(iv,false);refreshSyncState();if(isGasUrlSet())syncNow(true);
   if("serviceWorker" in navigator)navigator.serviceWorker.register("sw.js").catch(()=>{});
 }
 
@@ -1082,7 +1310,7 @@ function bindFavoriteEvents(){
   document.addEventListener("click",e=>{
     const undo=e.target.closest("[data-fav-undo]");if(undo){undoFavoriteDelete(undo.dataset.favUndo);return;}
     const use=e.target.closest("[data-fav-use]");
-    if(use){const x=state.favorites.find(x=>x.id===use.dataset.favUse&&!x.deleted);if(x){$(use.dataset.favTarget).value=x.label;renderFavorites();}return;}
+    if(use){const x=state.favorites.find(x=>x.id===use.dataset.favUse&&!x.deleted);if(x){$(use.dataset.favTarget).value=x.label;renderFavorites();saveBatchDraft();}return;}
     const quick=e.target.closest("[data-fav-quick]");if(quick){saveFavorite(quick.dataset.favKind,$(quick.dataset.favQuick).value);return;}
     const add=e.target.closest("[data-fav-add]");if(add){const label=prompt(add.dataset.favAdd==="requester"?"요청자 이름":"프로젝트 이름");if(label!==null)saveFavorite(add.dataset.favAdd,label);return;}
     const edit=e.target.closest("[data-fav-edit]");if(edit){const x=state.favorites.find(x=>x.id===edit.dataset.favEdit&&!x.deleted);if(x){const label=prompt("즐겨찾기 이름 수정",x.label);if(label!==null)saveFavorite(x.kind,label,x.id);}return;}
