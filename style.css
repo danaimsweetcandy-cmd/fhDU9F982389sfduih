@@ -25,6 +25,26 @@
   --radius-l:24px;
   --shadow-card:0 5px 18px rgba(44,51,48,.07);
 }
+
+/* v8.8.0: visible save state, optional export and interruption recovery */
+.save-status{position:sticky;top:0;z-index:20;min-height:36px;padding:9px 60px 8px 20px;background:var(--paper);border-bottom:1px solid var(--line);font-size:12px;color:var(--ink-soft);overflow-wrap:anywhere}
+.save-status[data-status="error"]{color:var(--danger)}
+.day-header{top:var(--save-status-height,36px)!important}
+.draft-resume{margin-top:8px;min-height:40px;border:1px solid var(--control-line);border-radius:9px;padding:7px 10px;font-size:12px;color:var(--accent)}
+.future-requests{margin-top:12px}.future-requests>summary{min-height:44px;padding:12px 3px;cursor:pointer;font-size:13px;color:var(--ink-soft)}
+.future-requests .pending-card{margin-top:8px}
+.log-note,.pending-meta,.summary-item .meta{overflow-wrap:anywhere}
+.mini-tag,.project-chip{max-width:100%;min-width:0;overflow-wrap:anywhere}
+.evaluation-tools{margin:0 20px 12px;border:1px solid var(--line);border-radius:12px;padding:0 12px;background:var(--paper-raised);font-size:13px}
+.evaluation-tools>summary{min-height:44px;padding:12px 0;cursor:pointer;font-weight:700}
+.evaluation-tools p{font-size:12px;color:var(--ink-soft);margin:0 0 8px}
+.evaluation-tools label{display:flex;align-items:center;gap:8px;min-height:40px}
+.evaluation-tools button{margin:4px 0 12px}
+.recovery-panel{margin-top:16px}.recovery-panel>summary{min-height:44px;padding:12px 0;font-size:13px;font-weight:700;cursor:pointer}
+.recovery-row{padding:12px 0;border-bottom:1px solid var(--line);font-size:12px;overflow-wrap:anywhere}.recovery-row p{color:var(--ink-soft)}
+.recovery-row summary{min-height:40px;padding:10px 0;cursor:pointer}.recovery-row pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:inherit;font-size:12px;max-height:240px;overflow:auto}
+.undo-stack{position:fixed;left:50%;bottom:calc(130px + env(safe-area-inset-bottom));transform:translateX(-50%);width:min(440px,calc(100vw - 24px));max-height:32vh;overflow:auto;z-index:85;pointer-events:none}
+.undo-stack .favorite-undo-area{position:static;transform:none;width:100%;max-height:none;overflow:visible;pointer-events:auto}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);font-family:"Pretendard","Apple SD Gothic Neo","Noto Sans KR",system-ui,sans-serif}
 body{display:flex;justify-content:center;font-size:15px;line-height:1.45}
@@ -163,3 +183,17 @@ input::placeholder,textarea::placeholder{color:var(--ink-faint);opacity:1}
 .batch-actions .secondary-btn{min-height:44px}
 .batch-actions button:disabled{opacity:.42;cursor:default}
 @media(max-width:359px){.batch-panel{padding:9px}.batch-content{font-size:13px;padding:8px}.batch-actions .primary-btn{font-size:11.5px}}
+
+/* v8.7.1 요청받은 일시 직접 지정 */
+.request-received-row{margin-top:10px}
+.request-received-row>label{display:block;margin:0 0 5px;font-size:11.5px;font-weight:800;color:var(--ink-soft)}
+.request-received-controls{display:flex;gap:7px;align-items:stretch}
+.request-received-controls input{flex:1;min-width:0;min-height:44px;border:1px solid var(--control-line);border-radius:10px;background:#fff;padding:8px 9px;font-size:13px;color:var(--ink)}
+.request-received-controls button{flex:none;min-height:44px;padding:8px 10px;border:1px solid var(--control-line);border-radius:10px;background:#fff;color:var(--accent);font-size:12px;font-weight:800}
+.request-received-controls button:active{background:var(--accent-soft)}
+@media(max-width:359px){.request-received-controls{flex-wrap:wrap}.request-received-controls input{flex-basis:100%}.request-received-controls button{margin-left:auto}}
+
+/* v8.7.2 요청일시 자동/개별 입력 검증 */
+.request-received-hint{margin:5px 1px 0;font-size:11px;color:var(--ink-faint)}
+.batch-due [aria-invalid="true"]{border-color:var(--danger)!important;background:#FFF2F2}
+.batch-due:has([aria-invalid="true"])>summary{color:var(--danger);font-weight:800}

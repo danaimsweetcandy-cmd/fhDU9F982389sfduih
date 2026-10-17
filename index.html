@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1F3D3A">
+<meta name="referrer" content="no-referrer">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <title>업무일지</title>
@@ -18,6 +19,7 @@
     <span id="syncDot" class="sync-dot" aria-hidden="true"></span>
     <span id="syncStatusText" class="sr-only">동기화 상태</span>
   </button>
+  <div id="saveStatusText" class="save-status" role="status" aria-live="polite">기기 저장 상태 확인 중</div>
 
   <main>
     <section id="view-today" class="view">
@@ -40,6 +42,7 @@
         </div>
 
         <button id="recordingDateHint" class="recording-date-hint" type="button" hidden></button>
+        <button id="resumeEditDraftBtn" class="draft-resume" type="button" hidden>작성 중이던 수정 이어쓰기</button>
 
         <div class="origin-row" role="group" aria-label="업무 발생 경로">
           <button class="origin-chip active" data-origin="" type="button">기본</button>
@@ -58,6 +61,14 @@
             <input id="requesterInput" type="text" maxlength="80" list="requesterList" autocomplete="off" placeholder="요청자 이름" aria-label="요청자 이름"><div class="favorite-input-tools"><div id="requesterInputFavorites" class="favorite-chips" role="group" aria-label="즐겨찾기"></div><button id="requesterInputFavoriteAdd" class="favorite-chip favorite-add" type="button" data-fav-quick="requesterInput" data-fav-kind="requester" aria-label="현재 입력을 즐겨찾기에 추가" disabled>+ 저장</button></div>
             <datalist id="requesterList"></datalist><datalist id="projectList"></datalist>
           </div>
+          <div class="request-received-row">
+            <label for="requestReceivedAt">요청받은 일시</label>
+            <div class="request-received-controls">
+              <input id="requestReceivedAt" type="datetime-local" step="60" aria-label="요청받은 날짜와 시간">
+              <button id="requestReceivedNow" type="button" aria-label="요청받은 일시를 현재 시각으로 설정">현재 시각</button>
+            </div>
+            <p class="request-received-hint">직접 변경하지 않으면 저장하는 순간의 시각으로 기록해.</p>
+          </div>
           <div class="when-row" role="group" aria-label="언제 할 요청인지">
             <button class="when-chip active" data-when="now" type="button">지금</button>
             <button class="when-chip" data-when="today" type="button">오늘</button>
@@ -65,7 +76,7 @@
             <button class="when-chip" data-when="date" type="button">날짜</button>
             <input id="requestDueDate" type="date" aria-label="요청 예정일" hidden>
           </div>
-          <p class="microcopy">요청받은 시각은 자동으로 남고, 시작한 뒤에는 날짜별 작업 기록을 이어서 남길 수 있어.</p>
+          <p class="microcopy">요청받은 일시와 업무 예정일은 서로 달라. 여러 업무에서는 공통 요청일시를 쓰거나 업무별로 변경할 수 있어.</p>
           <button id="batchToggle" type="button" class="batch-toggle">+ 여러 업무 한꺼번에 추가</button>
         </div>
 
@@ -78,10 +89,10 @@
         </details>
         <section id="batchPanel" class="batch-panel" aria-label="여러 요청 업무 입력" hidden>
           <div class="batch-heading"><strong>여러 업무 추가</strong><span id="batchCount" class="batch-count">0건 / 최대 20건</span></div>
-          <p class="batch-help">요청자·프로젝트·메모·태그는 모든 업무에 공통 적용돼. 일괄 등록한 업무는 각각 대기로 저장돼.</p>
+          <p class="batch-help">요청자·프로젝트·메모·태그와 위 요청일시는 공통 적용돼. 각 업무의 요청일시·예정일은 따로 변경할 수 있어. 일괄 등록한 업무는 각각 대기로 저장돼.</p>
           <div id="batchRows" class="batch-rows"></div>
           <button id="batchAddRowBtn" type="button" class="batch-add-row">+ 업무 추가</button>
-          <p class="batch-help">여러 줄을 붙여넣으면 업무별로 나뉘어 입력돼. 개별 예정일은 각 업무에서 변경할 수 있어.</p>
+          <p class="batch-help">여러 줄을 붙여넣으면 업무별로 나뉘어 입력돼. 개별 요청일시와 예정일은 각 업무에서 변경할 수 있어.</p>
           <div class="batch-actions"><button id="batchCancelBtn" type="button" class="secondary-btn">취소</button><button id="batchSaveBtn" type="button" class="primary-btn" disabled>0건 한꺼번에 저장</button></div>
         </section>
       </section>
@@ -105,7 +116,7 @@
       <details class="reflection" id="reflectionBox">
         <summary>
           <span id="reflectionTitle">오늘 회고</span>
-          <span id="reflectionHint" class="hint">비어있음</span>
+          <span id="reflectionHint" class="hint">선택 · 한 줄도 좋아</span>
         </summary>
         <div class="fields">
           <div class="field">
@@ -138,6 +149,12 @@
           <button id="nextMonth" type="button" aria-label="다음 달">›</button>
         </div>
       </header>
+      <details class="evaluation-tools">
+        <summary>평가용 기록 복사</summary>
+        <p>별표를 표시한 대표 업무를 정리해. 개인 회고는 포함하지 않아.</p>
+        <label><input id="evaluationAll" type="checkbox"> 이번 달 전체 작업 포함</label>
+        <button id="copyEvaluationBtn" class="secondary-btn" type="button">기록 복사</button>
+      </details>
       <div id="monthSummary" class="summary-wrap"></div>
     </section>
 
@@ -188,6 +205,12 @@
             <button id="exportCsvBtn" class="secondary-btn" type="button">CSV 저장</button>
           </div>
           <input id="importBackupFile" type="file" accept="application/json,.json" hidden>
+          <details id="recoveryPanel" class="recovery-panel">
+            <summary>복구본 확인</summary>
+            <p class="setting-help">최근 7일 이내 보관된 변경 전 내용과 충돌 복구본을 최대 100개 유지해. 현재 기록으로 되돌릴 수 있어. 손상 원본은 복구자료 파일에 별도 포함돼.</p>
+            <button id="exportRecoveryBtn" class="secondary-btn" type="button">복구자료 JSON 저장</button>
+            <div id="recoveryList"></div>
+          </details>
         </section>
       </div>
     </section>
@@ -212,7 +235,10 @@
     </button>
   </nav>
 
-  <div id="favoriteUndoArea" class="favorite-undo-area" role="status" aria-live="polite" hidden></div>
+  <div class="undo-stack">
+    <div id="logUndoArea" class="favorite-undo-area" role="status" aria-live="polite" hidden></div>
+    <div id="favoriteUndoArea" class="favorite-undo-area" role="status" aria-live="polite" hidden></div>
+  </div>
   <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
 
   <div id="editModal" class="modal" hidden>

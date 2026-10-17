@@ -1,12 +1,12 @@
 // ============================================================
-// 업무일지 PWA v8.6.1 백엔드
+// 업무일지 PWA v8.8.0 (스키마 3 유지, 안전한 삭제와 문자열 저장)
 // - 기존 Log / 로그, Reflection / 회고 데이터 하위 호환
 // - 모든 쓰기는 GET + query string
 // - 수정시각 + deviceId 버전 비교, tombstone, revision 증분 동기화
 // ============================================================
 
 const TOKEN = "여기를_기존_토큰과_같게_바꿔줘";
-const APP_ID = "dayeon-worklog";
+const APP_ID = "daeon-worklog";
 const SCHEMA_VERSION = 3;
 
 const LOG_SHEET = "Log";
@@ -266,6 +266,7 @@ function findExisting_(sheetNames, logicalHeader, value, wantedHeaders, aliases)
   return best;
 }
 
+function pendingWriteKey_(sheet,item){return "worklog_pending:"+sheet.getSheetId()+":"+String(item.id||item.date);}
 function writeObjectRow_(sheet, rowNumber, wantedHeaders, aliases, item) {
   ensureHeadersForWrite_(sheet, wantedHeaders, aliases);
   const hm = headerMap_(sheet);
@@ -275,18 +276,32 @@ function writeObjectRow_(sheet, rowNumber, wantedHeaders, aliases, item) {
     const index = headerIndex_(hm.map, header, aliases);
     if (index !== undefined && item[header] !== undefined) existing[index] = item[header];
   });
+  const pendingKey=pendingWriteKey_(sheet,item);
+  props_().setProperty(pendingKey,"1");
+  // Escape before the first write, then restore exact text with RichTextValue.
+  const formulaText=[];
+  wantedHeaders.forEach(header=>{
+    const index=headerIndex_(hm.map,header,aliases);
+    if(index!==undefined&&typeof item[header]==="string"&&item[header].startsWith("=")){
+      formulaText.push([index,item[header]]);existing[index]="'"+item[header];
+    }
+  });
   if (rowNumber > 0) {
     sheet.getRange(rowNumber, 1, 1, width).setValues([existing]);
   } else {
     sheet.appendRow(existing);
     rowNumber = sheet.getLastRow();
   }
+  formulaText.forEach(([index,value])=>sheet.getRange(rowNumber,index+1).setRichTextValue(SpreadsheetApp.newRichTextValue().setText(value).build()));
   ["date", "time", "requestedAt", "dueDate", "actualStartedAt", "completedAt", "deviceId"].forEach(header => {
     const index = headerIndex_(hm.map, header, aliases);
     if (index !== undefined && item[header] !== undefined) {
-      sheet.getRange(rowNumber, index + 1).setNumberFormat("@").setValue(item[header]);
+      const cell=sheet.getRange(rowNumber,index+1).setNumberFormat("@");
+      if(typeof item[header]==="string"&&item[header].startsWith("="))cell.setRichTextValue(SpreadsheetApp.newRichTextValue().setText(item[header]).build());
+      else cell.setValue(item[header]);
     }
   });
+  props_().deleteProperty(pendingKey);
   return rowNumber;
 }
 
@@ -408,7 +423,7 @@ function cleanReflectionPayload_(payload) {
 }
 
 function latestByKey_(rows, key) {
-  const out = {};
+  const out = Object.create(null);
   rows.forEach(row => {
     const id = String(row[key] || "");
     if (!id) return;
@@ -460,7 +475,7 @@ function applyAction_(action, payload) {
       const found = findExisting_([LOG_SHEET, LEGACY_LOG_SHEET], "id", incoming.id, LOG_HEADERS, LOG_ALIASES);
       if (found) {
         const cmp = compareVersion_(found.item, incoming);
-        if (cmp > 0 || (cmp === 0 && incoming.deviceId && incoming.deviceId === String(found.item.deviceId || ""))) return { skipped: true, revision: currentRevision_() };
+        if (cmp > 0 || (cmp === 0 && incoming.deviceId && incoming.deviceId === String(found.item.deviceId || "")&&!props_().getProperty(pendingWriteKey_(found.sheet,found.item)))) return { skipped: true, revision: currentRevision_() };
       }
       const target = found || { sheet: getSheet_(LOG_SHEET, LOG_HEADERS), row: 0, item: null };
       const merged = mergeLogPayload_(target.item, payload || {});
@@ -477,8 +492,14 @@ function applyAction_(action, payload) {
       const deviceId = text_(p.deviceId || "", 100, "deviceId", true);
       const incoming = { updatedAt, deviceId };
       const found = findExisting_([LOG_SHEET, LEGACY_LOG_SHEET], "id", id, LOG_HEADERS, LOG_ALIASES);
-      if (!found) return { skipped: true, revision: currentRevision_() };
-      { const cmp = compareVersion_(found.item, incoming); if (cmp > 0 || (cmp === 0 && deviceId && deviceId === String(found.item.deviceId || ""))) return { skipped: true, revision: currentRevision_() }; }
+      if (!found) {
+        // DELETE can precede a delayed ADD whose response was lost on another device.
+        const cleaned=cleanLogPayload_({...p,date:validDate_(p.date,false)||"2000-01-01",time:validTime_(p.time,false)||"00:00",content:p.content||"삭제된 기록",deleted:true},true);
+        const row={...defaultLog_(cleaned),deleted:true,rev:nextRevision_()};
+        writeObjectRow_(getSheet_(LOG_SHEET,LOG_HEADERS),0,LOG_HEADERS,LOG_ALIASES,row);
+        return {skipped:false,revision:row.rev};
+      }
+      { const cmp = compareVersion_(found.item, incoming); if (cmp > 0 || (cmp === 0 && deviceId && deviceId === String(found.item.deviceId || "")&&!props_().getProperty(pendingWriteKey_(found.sheet,found.item)))) return { skipped: true, revision: currentRevision_() }; }
       const row = { ...found.item, deleted: true, updatedAt, deviceId, rev: nextRevision_() };
       writeObjectRow_(found.sheet, found.row, LOG_HEADERS, LOG_ALIASES, row);
       return { skipped: false, revision: row.rev };
@@ -492,7 +513,7 @@ function applyAction_(action, payload) {
       if(found) {
         if(found.item.kind!==incoming.kind)throw new Error("즐겨찾기 종류는 바꿀 수 없어");
         const cmp=compareVersion_(found.item,incoming);
-        if(cmp>=0)return {skipped:true,revision:currentRevision_()};
+        if(cmp>0||(cmp===0&&!props_().getProperty(pendingWriteKey_(found.sheet,found.item))))return {skipped:true,revision:currentRevision_()};
       }
       const merged={...incoming,rev:nextRevision_()};
       const target=found||{sheet:getSheet_(FAV_SHEET,FAV_HEADERS),row:0};
@@ -501,7 +522,7 @@ function applyAction_(action, payload) {
     }
     const incoming = cleanReflectionPayload_(payload || {});
     const found = findExisting_([REFL_SHEET, LEGACY_REFL_SHEET], "date", incoming.date, REFL_HEADERS, REFL_ALIASES);
-    if (found) { const cmp = compareVersion_(found.item, incoming); if (cmp > 0 || (cmp === 0 && incoming.deviceId && incoming.deviceId === String(found.item.deviceId || ""))) return { skipped: true, revision: currentRevision_() }; }
+    if (found) { const cmp = compareVersion_(found.item, incoming); if (cmp > 0 || (cmp === 0 && incoming.deviceId && incoming.deviceId === String(found.item.deviceId || "")&&!props_().getProperty(pendingWriteKey_(found.sheet,found.item)))) return { skipped: true, revision: currentRevision_() }; }
     const target = found || { sheet: getSheet_(REFL_SHEET, REFL_HEADERS), row: 0, item: null };
     const merged = { ...(target.item || {}), ...incoming, rev: nextRevision_() };
     writeObjectRow_(target.sheet, target.row, REFL_HEADERS, REFL_ALIASES, merged);
@@ -515,21 +536,21 @@ function responseBase_() {
   return {
     appId: APP_ID,
     schemaVersion: SCHEMA_VERSION,
-    capabilities: ["contextFlagsV1", "requestWorkflowV1", "favoritesV1", "favoritesSyncV2"],
+    capabilities: ["contextFlagsV1", "requestWorkflowV1", "favoritesV1", "favoritesSyncV2", "safeDeleteV1", "literalTextV1"],
     storeId: storeId_(),
     serverTime: Date.now(),
     revision: currentRevision_()
   };
 }
 
-function checkToken_(event) { return !!(event && event.parameter && event.parameter.token === TOKEN); }
+function checkToken_(event) { return !!(TOKEN && TOKEN!=="여기를_기존_토큰과_같게_바꿔줘" && event && event.parameter && event.parameter.token === TOKEN); }
 function json_(obj) { return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON); }
 function ok_(extra) { return json_({ ok: true, ...responseBase_(), ...(extra || {}) }); }
 function fail_(error, code) { return json_({ ok: false, ...responseBase_(), error: String(error || "오류"), code: code || "ERROR" }); }
 
 function doGet(event) {
   const action = (event && event.parameter && event.parameter.action) || "getAll";
-  if (!checkToken_(event)) return fail_("토큰이 올바르지 않아", "AUTH");
+  if (!checkToken_(event)) return json_({ok:false,code:"AUTH",error:"토큰이 올바르지 않아"});
 
   if (action === "meta") return ok_({});
 
@@ -562,6 +583,9 @@ function doGet(event) {
   if (action !== "getAll") return fail_("알 수 없는 action이야", "UNKNOWN_ACTION");
 
   try {
+    const readLock=LockService.getScriptLock();readLock.waitLock(10000);
+    try {
+    if(Object.keys(props_().getProperties()).some(key=>key.startsWith("worklog_pending:")))throw new Error("이전 서버 저장을 마치지 못했어. 전송 대기가 있는 기기에서 다시 동기화해줘.");
     const currentRev = currentRevision_();
     const rawSince = event && event.parameter ? event.parameter.sinceRev : "";
     const hasSince = rawSince !== undefined && rawSince !== null && String(rawSince) !== "";
@@ -600,6 +624,7 @@ function doGet(event) {
       favorites: favoritesError?undefined:favoriteRows,
       sources: (forceFull || sinceRev === 0) ? { logs: logs.sources, reflections: reflections.sources } : undefined
     });
+    } finally {readLock.releaseLock();}
   } catch (err) {
     return fail_(err, "READ_FAILED");
   }
